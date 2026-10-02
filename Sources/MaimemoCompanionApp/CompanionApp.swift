@@ -1,17 +1,37 @@
 import AppKit
 import SwiftUI
 import MaimemoAXCore
+import WordMemoryCore
 
 @MainActor
 final class CompanionViewModel: ObservableObject {
     @Published private(set) var snapshot: MaimemoAXSnapshot
     @Published private(set) var lastChangeAt: Date?
+    @Published private(set) var memoryCard: MemoryCard?
+    @Published private(set) var selectedBranchID: String?
+    @Published private(set) var isGenerating = false
+    @Published var memoryError: String?
+    @Published var learnerNote = ""
+    @Published var selectedMethodKind: MemoryMethodKind? = nil
+    @Published var showAnswer = false
+    @Published var showModelSettings = false
+    @Published var endpointText: String
+    @Published var modelText: String
+    @Published var enteredAPIKey = ""
+    @Published private(set) var hasStoredAPIKey: Bool
 
     let reader: MaimemoAccessibilityReader
+    let memoryStore: MemoryStore
     private var previousWord: String?
+    private let modelClient = OpenAICompatibleClient()
 
-    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader()) {
+    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore()) {
         self.reader = reader
+        self.memoryStore = memoryStore
+        self.endpointText = UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
+        self.modelText = UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
+        self.hasStoredAPIKey = ModelSecretStore.load() != nil
+        self.memoryError = memoryStore.loadWarning
         self.snapshot = MaimemoAXSnapshot(
             appFound: false,
             appName: "墨墨",
@@ -29,9 +49,133 @@ final class CompanionViewModel: ObservableObject {
         let next = reader.scan()
         if next.word != previousWord, next.word != nil {
             lastChangeAt = Date()
+            if let word = next.word {
+                memoryCard = memoryStore.card(for: word)
+                selectedBranchID = memoryCard?.branches.first?.id
+                showAnswer = false
+                learnerNote = ""
+                if memoryCard != nil {
+                    do { try memoryStore.recordEncounter(word: word) }
+                    catch { memoryError = "本地记录更新失败：\(error.localizedDescription)" }
+                }
+            }
+        } else if next.word == nil, previousWord != nil {
+            memoryCard = nil
+            selectedBranchID = nil
         }
         previousWord = next.word
         snapshot = next
+    }
+
+    var selectedBranch: MeaningBranch? {
+        memoryCard?.branches.first(where: { $0.id == selectedBranchID }) ?? memoryCard?.branches.first
+    }
+
+    var branchHistory: BranchMemory? {
+        guard let branch = selectedBranch, let word = snapshot.word else { return nil }
+        return memoryStore.branch(for: word, partOfSpeech: branch.partOfSpeech, meaningKey: branch.meaningKey)
+    }
+
+    var modelIsConfigured: Bool {
+        !endpointText.isEmpty && !modelText.isEmpty && hasStoredAPIKey
+    }
+
+    func saveModelSettings() {
+        let endpoint = endpointText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = modelText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: endpoint), !model.isEmpty else {
+            memoryError = "请填写完整的模型地址与名称"
+            return
+        }
+        let host = url.host?.lowercased() ?? ""
+        guard !host.isEmpty,
+              url.scheme == "https" || (url.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(host)) else {
+            memoryError = MemoryHarnessError.unsafeEndpoint.localizedDescription
+            return
+        }
+        do {
+            if !enteredAPIKey.isEmpty {
+                try ModelSecretStore.save(enteredAPIKey)
+                hasStoredAPIKey = true
+                enteredAPIKey = ""
+            }
+            endpointText = endpoint
+            modelText = model
+            UserDefaults.standard.set(endpoint, forKey: "memory.model.endpoint")
+            UserDefaults.standard.set(model, forKey: "memory.model.name")
+            memoryError = nil
+            showModelSettings = false
+        } catch {
+            memoryError = "API Key 无法保存到钥匙串：\(error.localizedDescription)"
+        }
+    }
+
+    func generateMemoryCard() {
+        guard let word = snapshot.word else { return }
+        guard let url = URL(string: endpointText), let key = ModelSecretStore.load() else {
+            showModelSettings = true
+            memoryError = MemoryHarnessError.notConfigured.localizedDescription
+            return
+        }
+        let previous = branchHistory
+        let request = MemoryRequest(
+            word: word,
+            learnerNote: learnerNote,
+            previousReason: previous?.forgetReason,
+            preferredMethod: selectedMethodKind,
+            previousMethod: previous?.methodVersions.last?.method.cue,
+            existingCard: memoryCard,
+            focusMeaningKey: selectedBranch?.meaningKey
+        )
+        let configuration = ModelConfiguration(endpoint: url, model: modelText, apiKey: key)
+        isGenerating = true
+        memoryError = nil
+        Task {
+            do {
+                let card = try await modelClient.generate(request, configuration: configuration)
+                try memoryStore.save(card)
+                if snapshot.word == word {
+                    memoryCard = card
+                    selectedBranchID = card.branches.first?.id
+                    showAnswer = false
+                }
+            } catch {
+                memoryError = error.localizedDescription
+            }
+            isGenerating = false
+        }
+    }
+
+    func selectBranch(_ branch: MeaningBranch) {
+        selectedBranchID = branch.id
+        showAnswer = false
+    }
+
+    func selectMethod(_ method: MemoryMethod) {
+        guard let word = snapshot.word, let branch = selectedBranch else { return }
+        let reason = branchHistory?.forgetReason == .methodFailed ? "上次记法无效，用户选择新方法" : nil
+        do {
+            try memoryStore.selectMethod(word: word, branch: branch, method: method, reason: reason)
+            objectWillChange.send()
+        } catch {
+            memoryError = "记法保存失败：\(error.localizedDescription)"
+        }
+    }
+
+    func recordFeedback(_ result: RecallResult, reason: ForgetReason?) {
+        guard let word = snapshot.word, let branch = selectedBranch else { return }
+        do {
+            let condition: RecallCondition
+            if memoryCard?.transferCheck.targetBranch != branch.meaningKey {
+                condition = .selfReport
+            } else {
+                condition = showAnswer ? .newSentenceAfterReveal : .newSentenceBeforeReveal
+            }
+            try memoryStore.recordFeedback(word: word, branch: branch, result: result, condition: condition, reason: reason, note: learnerNote)
+            objectWillChange.send()
+        } catch {
+            memoryError = "反馈保存失败：\(error.localizedDescription)"
+        }
     }
 
     func promptForAccessibility() {
@@ -48,12 +192,12 @@ final class CompanionViewModel: ObservableObject {
 struct SidebarView: View {
     @ObservedObject var model: CompanionViewModel
 
-    private let blue = Color(red: 0.05, green: 0.24, blue: 0.55)
+    private let blue = Color(red: 0.08, green: 0.28, blue: 0.62)
 
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [blue, Color(red: 0.10, green: 0.40, blue: 0.78)],
+                colors: [blue, Color(red: 0.12, green: 0.43, blue: 0.77)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -64,13 +208,14 @@ struct SidebarView: View {
                     header
                     connectionCard
                     wordCard
+                    MemoryPanelView(model: model)
                     debugCard
                     permissionCard
                 }
                 .padding(22)
             }
         }
-        .frame(minWidth: 330, idealWidth: 360, maxWidth: 390, minHeight: 560)
+        .frame(minWidth: 360, idealWidth: 410, maxWidth: 520, minHeight: 560)
         .preferredColorScheme(.dark)
     }
 
@@ -78,7 +223,7 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Maimemo Companion")
                 .font(.system(size: 24, weight: .bold, design: .rounded))
-            Text("第一里程碑 · 只读跟词探针")
+            Text("跟词 · 理解 · 记住")
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.72))
         }
@@ -99,7 +244,7 @@ struct SidebarView: View {
             Spacer()
         }
         .padding(14)
-        .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var wordCard: some View {
@@ -119,7 +264,7 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
-        .background(.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 18))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var debugCard: some View {
@@ -140,7 +285,7 @@ struct SidebarView: View {
             }
         }
         .padding(14)
-        .background(.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 14))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var permissionCard: some View {
@@ -161,7 +306,7 @@ struct SidebarView: View {
                 .foregroundStyle(.white.opacity(0.58))
         }
         .padding(14)
-        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var statusTitle: String {
@@ -192,7 +337,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let hosting = NSHostingView(rootView: SidebarView(model: model))
-        let contentRect = NSRect(x: 0, y: 0, width: 360, height: 700)
+        let contentRect = NSRect(x: 0, y: 0, width: 410, height: 760)
         let window = NSWindow(
             contentRect: contentRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -204,7 +349,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         window.isReleasedWhenClosed = false
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.minSize = NSSize(width: 330, height: 560)
+        window.minSize = NSSize(width: 360, height: 560)
         window.setFrameAutosaveName("MaimemoCompanionSidebar")
         window.makeKeyAndOrderFront(nil)
         self.window = window

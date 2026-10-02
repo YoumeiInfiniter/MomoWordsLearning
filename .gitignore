@@ -7,6 +7,7 @@
 # Swift build output
 .build/
 build/
+outputs/
 .swift-module-cache/
 .clang-module-cache/
 .swiftpm-cache/

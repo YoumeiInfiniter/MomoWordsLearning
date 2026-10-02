@@ -9,12 +9,17 @@ let package = Package(
     ],
     products: [
         .library(name: "MaimemoAXCore", targets: ["MaimemoAXCore"]),
+        .library(name: "WordMemoryCore", targets: ["WordMemoryCore"]),
         .executable(name: "maimemo-ax-probe", targets: ["MaimemoAXProbe"]),
+        .executable(name: "word-memory-check", targets: ["WordMemoryCheck"]),
         .executable(name: "MaimemoCompanion", targets: ["MaimemoCompanionApp"])
     ],
     targets: [
         .target(
             name: "MaimemoAXCore"
+        ),
+        .target(
+            name: "WordMemoryCore"
         ),
         .executableTarget(
             name: "MaimemoAXProbe",
@@ -22,7 +27,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "MaimemoCompanionApp",
-            dependencies: ["MaimemoAXCore"]
+            dependencies: ["MaimemoAXCore", "WordMemoryCore"]
+        ),
+        .executableTarget(
+            name: "WordMemoryCheck",
+            dependencies: ["WordMemoryCore"]
         )
     ]
 )

@@ -1,0 +1,50 @@
+# macOS / editors
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Swift build output
+.build/
+build/
+.swift-module-cache/
+.clang-module-cache/
+.swiftpm-cache/
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
+
+# Runtime and debug output
+logs/
+tmp/
+cache/
+*.log
+*.trace
+ax-tree-*.txt
+ax-tree-*.json
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+secrets/
+credentials/
+*token*
+*api_key*
+*apikey*
+
+# Personal learning data and generated assets (future stages)
+data/
+personal-data/
+learning-history/
+generated-assets/
+user-content/
+
+# Local-only overrides
+*.local.json
+*.local.plist
+Package.resolved

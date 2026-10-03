@@ -27,6 +27,7 @@ public struct MaimemoAXSnapshot: Sendable {
     public let candidates: [AXTextCandidate]
     public let scannedAt: Date
     public let diagnostic: String
+    public let scanIncomplete: Bool
 
     public init(
         appFound: Bool,
@@ -37,7 +38,8 @@ public struct MaimemoAXSnapshot: Sendable {
         nodeCount: Int,
         candidates: [AXTextCandidate],
         scannedAt: Date,
-        diagnostic: String
+        diagnostic: String,
+        scanIncomplete: Bool = false
     ) {
         self.appFound = appFound
         self.appName = appName
@@ -48,6 +50,7 @@ public struct MaimemoAXSnapshot: Sendable {
         self.candidates = candidates
         self.scannedAt = scannedAt
         self.diagnostic = diagnostic
+        self.scanIncomplete = scanIncomplete
     }
 }
 
@@ -60,13 +63,6 @@ public final class MaimemoAccessibilityReader {
     public static let maimemoPath = "/Applications/Maimemo.app"
 
     private let workspace: NSWorkspace
-    private let excludedWords: Set<String> = [
-        "back", "cancel", "close", "confirm", "continue", "delete", "done", "edit",
-        "enter", "exit", "finish", "forward", "history", "home", "more", "next",
-        "no", "pause", "play", "previous", "reset", "review", "save", "search",
-        "settings", "skip", "start", "stop", "submit", "today", "yes"
-    ]
-
     public init(workspace: NSWorkspace = .shared) {
         self.workspace = workspace
     }
@@ -86,13 +82,36 @@ public final class MaimemoAccessibilityReader {
     }
 
     public func scan() -> MaimemoAXSnapshot {
+        switch prepareScan() {
+        case .snapshot(let snapshot): return snapshot
+        case .target(let pid, let name): return AXTreeScanner().scan(pid: pid, appName: name)
+        }
+    }
+
+    /// AX calls can wait on another process. Never run this from the UI thread.
+    public func scanAsync() async -> MaimemoAXSnapshot {
+        switch prepareScan() {
+        case .snapshot(let snapshot): return snapshot
+        case .target(let pid, let name):
+            return await Task.detached(priority: .utility) {
+                AXTreeScanner().scan(pid: pid, appName: name)
+            }.value
+        }
+    }
+
+    private enum ScanPreparation {
+        case snapshot(MaimemoAXSnapshot)
+        case target(pid_t, String)
+    }
+
+    private func prepareScan() -> ScanPreparation {
         let trusted = AXIsProcessTrusted()
         let runningApp = workspace.runningApplications.first {
             $0.bundleIdentifier == Self.maimemoBundleIdentifier
         }
 
         guard let runningApp else {
-            return MaimemoAXSnapshot(
+            return .snapshot(MaimemoAXSnapshot(
                 appFound: false,
                 appName: "墨墨",
                 isTrusted: trusted,
@@ -102,11 +121,11 @@ public final class MaimemoAccessibilityReader {
                 candidates: [],
                 scannedAt: Date(),
                 diagnostic: "未找到运行中的墨墨（bundle id: \(Self.maimemoBundleIdentifier)）"
-            )
+            ))
         }
 
         guard trusted else {
-            return MaimemoAXSnapshot(
+            return .snapshot(MaimemoAXSnapshot(
                 appFound: true,
                 appName: runningApp.localizedName ?? "墨墨",
                 isTrusted: false,
@@ -116,13 +135,28 @@ public final class MaimemoAccessibilityReader {
                 candidates: [],
                 scannedAt: Date(),
                 diagnostic: "已找到墨墨，但当前进程没有辅助功能权限"
-            )
+            ))
         }
 
-        let application = AXUIElementCreateApplication(runningApp.processIdentifier)
+        return .target(runningApp.processIdentifier, runningApp.localizedName ?? "墨墨")
+    }
+}
+
+private struct AXTreeScanner {
+    private let excludedWords: Set<String> = [
+        "back", "cancel", "close", "confirm", "continue", "delete", "done", "edit",
+        "enter", "exit", "finish", "forward", "history", "home", "more", "next",
+        "no", "pause", "play", "previous", "reset", "review", "save", "search",
+        "settings", "skip", "start", "stop", "submit", "today", "yes"
+    ]
+
+    func scan(pid: pid_t, appName: String) -> MaimemoAXSnapshot {
+        let application = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(application, 0.2)
         let window = focusedWindow(in: application) ?? firstWindow(in: application)
         let root = window ?? application
         var context = ScanContext()
+        context.deadline = ProcessInfo.processInfo.systemUptime + 1.2
         visit(root, context: &context, depth: 0, windowFrame: nil)
 
         let ranked = context.candidates
@@ -137,21 +171,22 @@ public final class MaimemoAccessibilityReader {
         let frame = context.windowFrame
         let diagnostic: String
         if let word {
-            diagnostic = "读取 \(context.nodeCount) 个节点，最佳候选：\(word)"
+            diagnostic = "读取 \(context.nodeCount) 个节点，最佳候选：\(word)" + (context.timedOut ? "（扫描限时）" : "")
         } else {
-            diagnostic = "读取 \(context.nodeCount) 个节点，未找到单个英文单词候选"
+            diagnostic = "读取 \(context.nodeCount) 个节点，未找到单个英文单词候选" + (context.timedOut ? "（扫描限时）" : "")
         }
 
         return MaimemoAXSnapshot(
             appFound: true,
-            appName: runningApp.localizedName ?? "墨墨",
+            appName: appName,
             isTrusted: true,
             word: word,
             windowFrame: frame,
             nodeCount: context.nodeCount,
             candidates: candidates,
             scannedAt: Date(),
-            diagnostic: diagnostic
+            diagnostic: diagnostic,
+            scanIncomplete: context.timedOut
         )
     }
 
@@ -161,6 +196,8 @@ public final class MaimemoAccessibilityReader {
         var candidates: [AXTextCandidate] = []
         var windowFrame: CGRect?
         var seenTexts = Set<String>()
+        var deadline: TimeInterval = 0
+        var timedOut = false
     }
 
     private func focusedWindow(in application: AXUIElement) -> AXUIElement? {
@@ -183,6 +220,11 @@ public final class MaimemoAccessibilityReader {
         windowFrame: CGRect?
     ) {
         guard depth < 40, context.nodeCount < 2_000 else { return }
+        guard ProcessInfo.processInfo.systemUptime < context.deadline else {
+            context.timedOut = true
+            return
+        }
+        AXUIElementSetMessagingTimeout(element, 0.2)
         context.nodeCount += 1
         context.sequence += 1
 

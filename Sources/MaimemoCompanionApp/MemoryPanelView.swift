@@ -17,9 +17,6 @@ struct MemoryPanelView: View {
                     emptyState
                 }
                 generationControls
-                if model.showModelSettings {
-                    modelSettings
-                }
                 if let error = model.memoryError {
                     Label(error, systemImage: "exclamationmark.circle")
                         .font(.caption)
@@ -28,8 +25,9 @@ struct MemoryPanelView: View {
                 }
             }
         }
-        .padding(17)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .padding(22)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.12)))
         .onChange(of: model.snapshot.word) { _ in
             forgetReason = .core
         }
@@ -37,8 +35,8 @@ struct MemoryPanelView: View {
 
     private var titleRow: some View {
         HStack {
-            Label("单词记忆", systemImage: "brain.head.profile")
-                .font(.headline)
+            Text("记住这个词")
+                .font(.custom("Songti SC", size: 22))
             Spacer()
             if model.memoryCard != nil && model.isMemoryRevealed {
                 Text("本地已保存")
@@ -50,15 +48,16 @@ struct MemoryPanelView: View {
 
     private var recallFirstState: some View {
         VStack(alignment: .leading, spacing: 11) {
-            Text(model.snapshot.word == nil ? "等待墨墨显示当前词" : "先在墨墨里想一想：这个词是什么意思？")
-                .font(.subheadline.weight(.semibold))
-            Text("觉得需要帮助时，再打开核心关系、语境和速记方法。")
-                .font(.caption)
+            Text(model.snapshot.word == nil ? "等待墨墨显示当前词" : "先给自己几秒钟，回忆它的意思。")
+                .font(.custom("Songti SC", size: 17))
+            Text("需要线索时，再看核心关系、语境和联想。")
+                .font(.custom("Songti SC", size: 13))
                 .foregroundStyle(.white.opacity(0.68))
             Button("查看速记方法") {
                 model.revealMemoryHelp()
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .disabled(model.snapshot.word == nil)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -264,7 +263,7 @@ struct MemoryPanelView: View {
                 if model.isGenerating { ProgressView().controlSize(.small) }
                 Spacer()
                 Button(model.modelIsConfigured ? "模型设置" : "接入模型") {
-                    model.showModelSettings.toggle()
+                    model.openSettings()
                 }
                 .buttonStyle(.plain)
                 .font(.caption)
@@ -275,26 +274,6 @@ struct MemoryPanelView: View {
                     .foregroundStyle(.white.opacity(0.64))
             }
         }
-    }
-
-    private var modelSettings: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            sectionLabel("OpenAI 兼容模型接口")
-            TextField("完整接口地址，例如 https://…/v1/chat/completions", text: $model.endpointText)
-                .textFieldStyle(.roundedBorder)
-            TextField("模型名称", text: $model.modelText)
-                .textFieldStyle(.roundedBorder)
-            SecureField(model.hasStoredAPIKey ? "API Key 已在钥匙串；留空则沿用" : "API Key", text: $model.enteredAPIKey)
-                .textFieldStyle(.roundedBorder)
-            Button("保存模型设置") { model.saveModelSettings() }
-                .buttonStyle(.borderedProminent)
-            Text("地址与模型名称保存在本机偏好设置；密钥只存 macOS 钥匙串。点击生成时会把当前词和你输入的卡点发给该接口。")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.62))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(12)
-        .background(.black.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func sectionLabel(_ title: String) -> some View {

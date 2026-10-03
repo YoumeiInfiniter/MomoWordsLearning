@@ -95,7 +95,7 @@ Maimemo Companion 是与墨墨背单词并排运行的 macOS 右侧伴学侧栏�
 ### 5.3 构建方式
 
 - Swift Package 提供两个可执行目标：技术探针与侧栏应用。
-- `scripts/build-app.sh` 将 SwiftPM 构建出的应用可执行文件封装为稳定路径下的 `.app`，便于辅助功能授权。
+- `scripts/build-app.sh` 将 SwiftPM 构建出的应用可执行文件封装为稳定路径下的 `.app`，并使用稳定的本机代码签名身份；路径和签名身份都影响辅助功能授权能否跨版本延续。
 - 不依赖完整 Xcode，也不引入第三方包。
 
 ## 6. 权限模型

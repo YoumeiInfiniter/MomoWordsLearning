@@ -8,24 +8,31 @@ struct MemoryPanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             titleRow
-            if let card = model.memoryCard {
-                cardContents(card)
+            if !model.isMemoryRevealed {
+                recallFirstState
             } else {
-                emptyState
-            }
-            generationControls
-            if model.showModelSettings {
-                modelSettings
-            }
-            if let error = model.memoryError {
-                Label(error, systemImage: "exclamationmark.circle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let card = model.memoryCard {
+                    cardContents(card)
+                } else {
+                    emptyState
+                }
+                generationControls
+                if model.showModelSettings {
+                    modelSettings
+                }
+                if let error = model.memoryError {
+                    Label(error, systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(17)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .onChange(of: model.snapshot.word) { _ in
+            forgetReason = .core
+        }
     }
 
     private var titleRow: some View {
@@ -33,12 +40,28 @@ struct MemoryPanelView: View {
             Label("单词记忆", systemImage: "brain.head.profile")
                 .font(.headline)
             Spacer()
-            if model.memoryCard != nil {
+            if model.memoryCard != nil && model.isMemoryRevealed {
                 Text("本地已保存")
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.white.opacity(0.65))
             }
         }
+    }
+
+    private var recallFirstState: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text(model.snapshot.word == nil ? "等待墨墨显示当前词" : "先在墨墨里想一想：这个词是什么意思？")
+                .font(.subheadline.weight(.semibold))
+            Text("觉得需要帮助时，再打开核心关系、语境和速记方法。")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.68))
+            Button("查看速记方法") {
+                model.revealMemoryHelp()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.snapshot.word == nil)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var emptyState: some View {

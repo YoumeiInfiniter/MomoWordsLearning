@@ -8,6 +8,7 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var snapshot: MaimemoAXSnapshot
     @Published private(set) var lastChangeAt: Date?
     @Published private(set) var memoryCard: MemoryCard?
+    @Published private(set) var isMemoryRevealed = false
     @Published private(set) var selectedBranchID: String?
     @Published private(set) var isGenerating = false
     @Published var memoryError: String?
@@ -49,6 +50,10 @@ final class CompanionViewModel: ObservableObject {
         let next = reader.scan()
         if next.word != previousWord, next.word != nil {
             lastChangeAt = Date()
+            isMemoryRevealed = false
+            showModelSettings = false
+            selectedMethodKind = nil
+            memoryError = memoryStore.loadWarning
             if let word = next.word {
                 memoryCard = memoryStore.card(for: word)
                 selectedBranchID = memoryCard?.branches.first?.id
@@ -62,6 +67,9 @@ final class CompanionViewModel: ObservableObject {
         } else if next.word == nil, previousWord != nil {
             memoryCard = nil
             selectedBranchID = nil
+            isMemoryRevealed = false
+            showModelSettings = false
+            selectedMethodKind = nil
         }
         previousWord = next.word
         snapshot = next
@@ -78,6 +86,18 @@ final class CompanionViewModel: ObservableObject {
 
     var modelIsConfigured: Bool {
         !endpointText.isEmpty && !modelText.isEmpty && hasStoredAPIKey
+    }
+
+    func revealMemoryHelp() {
+        guard snapshot.word != nil else { return }
+        isMemoryRevealed = true
+        if memoryCard == nil {
+            if modelIsConfigured {
+                generateMemoryCard()
+            } else {
+                showModelSettings = true
+            }
+        }
     }
 
     func saveModelSettings() {

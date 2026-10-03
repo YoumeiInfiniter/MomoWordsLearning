@@ -36,7 +36,7 @@ final class CompanionViewModel: ObservableObject {
         self.memoryStore = memoryStore
         self.endpointText = UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
         self.modelText = UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
-        self.hasStoredAPIKey = ModelSecretStore.load() != nil
+        self.hasStoredAPIKey = false
         self.memoryError = memoryStore.loadWarning
         let initialSnapshot = MaimemoAXSnapshot(
             appFound: false,
@@ -52,6 +52,12 @@ final class CompanionViewModel: ObservableObject {
         self.snapshot = initialSnapshot
         self.diagnosticSnapshot = initialSnapshot
         self.lastScanSnapshot = initialSnapshot
+        Task { [weak self] in
+            let exists = await Task.detached(priority: .utility) {
+                ModelSecretStore.exists()
+            }.value
+            self?.hasStoredAPIKey = exists
+        }
     }
 
     func refresh() async -> MaimemoAXSnapshot {
@@ -109,9 +115,6 @@ final class CompanionViewModel: ObservableObject {
     func revealMemoryHelp() {
         guard snapshot.word != nil else { return }
         isMemoryRevealed = true
-        if memoryCard == nil && modelIsConfigured {
-            generateMemoryCard()
-        }
     }
 
     func saveModelSettings() {
@@ -271,33 +274,30 @@ struct SidebarView: View {
                         settingsPage
                     } else {
                         header
-                        connectionCard
+                        if !model.snapshot.appFound || !model.snapshot.isTrusted || model.isShowingLastCapturedWord {
+                            connectionCard
+                        }
                         wordCard
                         MemoryPanelView(model: model)
-                        Text("先回忆，再查看；只把有用的线索留下。")
-                            .font(.custom("Songti SC", size: 12))
-                            .foregroundStyle(muted)
-                            .frame(maxWidth: .infinity)
                     }
                 }
                 .padding(26)
             }
         }
-        .frame(minWidth: 380, idealWidth: 440, maxWidth: 580, minHeight: 580)
+        .frame(minWidth: 320, idealWidth: 410, maxWidth: 580, minHeight: 300)
         .preferredColorScheme(.dark)
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("M A I M E M O")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .tracking(2.6)
-                    .foregroundStyle(accent)
-                Text("一词，一种理解")
-                    .font(.custom("Songti SC", size: 25))
-                    .foregroundStyle(.white.opacity(0.92))
-            }
+        HStack(spacing: 9) {
+            Text("M A I M E M O")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .tracking(2.1)
+                .foregroundStyle(accent)
+            Circle()
+                .fill(statusColor)
+                .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
             Spacer()
             Button { model.openSettings() } label: {
                 Image(systemName: "slider.horizontal.3")
@@ -328,7 +328,7 @@ struct SidebarView: View {
     }
 
     private var wordCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(model.snapshot.word == nil ? "等待墨墨显示单词" :
                  model.isShowingLastCapturedWord ? "最近捕获的单词" : "此刻的单词")
                 .font(.custom("Songti SC", size: 13))
@@ -339,17 +339,10 @@ struct SidebarView: View {
                 .foregroundStyle(.white.opacity(0.95))
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
-            Rectangle()
-                .fill(accent.opacity(0.28))
-                .frame(height: 1)
-            Text("你会如何理解它？")
-                .font(.custom("Songti SC", size: 17))
-                .foregroundStyle(.white.opacity(0.8))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(24)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
-        .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.12)))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 24)
     }
 
     private var settingsPage: some View {
@@ -474,7 +467,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let hosting = NSHostingView(rootView: SidebarView(model: model))
-        let contentRect = NSRect(x: 0, y: 0, width: 410, height: 760)
+        let contentRect = NSRect(x: 0, y: 0, width: 410, height: 540)
         let window = NSWindow(
             contentRect: contentRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -486,8 +479,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         window.isReleasedWhenClosed = false
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.minSize = NSSize(width: 360, height: 560)
-        window.setFrameAutosaveName("MaimemoCompanionSidebar")
+        window.minSize = NSSize(width: 320, height: 300)
+        window.setFrameAutosaveName("MaimemoCompanionCompactSidebar")
         window.makeKeyAndOrderFront(nil)
         self.window = window
 
@@ -516,23 +509,44 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     private func positionBesideMaimemo(_ axFrame: CGRect) {
         guard let window else { return }
-        // Never move the window while the learner is clicking or typing in it.
-        guard !window.isKeyWindow else { return }
-        let sidebarSize = window.frame.size
-        let screen = NSScreen.screens.first { screen in
-            let candidateY = screen.frame.maxY - axFrame.midY
-            return screen.frame.contains(CGPoint(x: axFrame.midX, y: candidateY))
-        } ?? NSScreen.main
-        guard let screen else { return }
-        let visible = screen.visibleFrame
-        let appKitY = screen.frame.maxY - axFrame.maxY
-        let desiredX = axFrame.maxX + 12
-        let x = min(desiredX, visible.maxX - sidebarSize.width)
-        let y = min(max(appKitY, visible.minY), visible.maxY - sidebarSize.height)
-        let destination = NSPoint(x: max(visible.minX, x), y: y)
-        guard abs(window.frame.minX - destination.x) > 2 || abs(window.frame.minY - destination.y) > 2 else { return }
-        window.setFrameOrigin(destination)
+        guard !window.inLiveResize, axFrame.width > 0, axFrame.height > 0,
+              let primaryScreen = NSScreen.screens.first else { return }
+
+        // Accessibility uses a top-left origin; AppKit uses a bottom-left origin.
+        let maimemoFrame = CGRect(
+            x: axFrame.minX,
+            y: primaryScreen.frame.maxY - axFrame.maxY,
+            width: axFrame.width,
+            height: axFrame.height
+        )
+        guard let screen = NSScreen.screens.max(by: {
+            $0.frame.intersection(maimemoFrame).area < $1.frame.intersection(maimemoFrame).area
+        }), screen.frame.intersection(maimemoFrame).area > 0 else { return }
+
+        let visibleMaimemo = maimemoFrame.intersection(screen.visibleFrame)
+        let availableWidth = screen.visibleFrame.maxX - maimemoFrame.maxX
+        let width = min(410, availableWidth)
+        // A narrow or full-screen Maimemo window leaves no usable right-side dock.
+        guard !visibleMaimemo.isNull, width >= window.minSize.width,
+              visibleMaimemo.height >= window.minSize.height else { return }
+
+        let destination = NSRect(
+            x: maimemoFrame.maxX,
+            y: visibleMaimemo.minY,
+            width: width,
+            height: visibleMaimemo.height
+        )
+        let current = window.frame
+        guard abs(current.minX - destination.minX) > 1 ||
+              abs(current.minY - destination.minY) > 1 ||
+              abs(current.width - destination.width) > 1 ||
+              abs(current.height - destination.height) > 1 else { return }
+        window.setFrame(destination, display: true)
     }
+}
+
+private extension CGRect {
+    var area: CGFloat { isNull ? 0 : width * height }
 }
 
 @main

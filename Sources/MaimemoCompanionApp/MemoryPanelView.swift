@@ -4,25 +4,32 @@ import WordMemoryCore
 struct MemoryPanelView: View {
     @ObservedObject var model: CompanionViewModel
     @State private var forgetReason: ForgetReason = .core
+    @State private var helpIndex = 0
+    @State private var isDeepDiveOpen = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            titleRow
+        VStack(alignment: .leading, spacing: 16) {
             if !model.isMemoryRevealed {
                 recallFirstState
+            } else if let card = model.memoryCard {
+                quickCard(card)
+                if isDeepDiveOpen {
+                    deepDive(card)
+                }
+            } else if model.isGenerating {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("正在整理一条有用的线索…")
+                        .font(.custom("Songti SC", size: 15))
+                }
             } else {
-                if let card = model.memoryCard {
-                    cardContents(card)
-                } else {
-                    emptyState
-                }
-                generationControls
-                if let error = model.memoryError {
-                    Label(error, systemImage: "exclamationmark.circle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                emptyState
+            }
+            if model.isMemoryRevealed, let error = model.memoryError {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(22)
@@ -30,75 +37,128 @@ struct MemoryPanelView: View {
         .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.12)))
         .onChange(of: model.snapshot.word) { _ in
             forgetReason = .core
+            helpIndex = 0
+            isDeepDiveOpen = false
         }
-    }
-
-    private var titleRow: some View {
-        HStack {
-            Text("记住这个词")
-                .font(.custom("Songti SC", size: 22))
-            Spacer()
-            if model.memoryCard != nil && model.isMemoryRevealed {
-                Text("本地已保存")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.65))
-            }
+        .onChange(of: model.memoryCard) { _ in
+            helpIndex = 0
         }
     }
 
     private var recallFirstState: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Text(model.snapshot.word == nil ? "等待墨墨显示当前词" : "先给自己几秒钟，回忆它的意思。")
-                .font(.custom("Songti SC", size: 17))
-            Text("需要线索时，再看核心关系、语境和联想。")
-                .font(.custom("Songti SC", size: 13))
-                .foregroundStyle(.white.opacity(0.68))
-            Button("查看速记方法") {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(model.snapshot.word == nil ? "等待墨墨显示当前词" : "先自己想一想")
+                    .font(.custom("Songti SC", size: 18))
+                Text("需要时再打开提示")
+                    .font(.custom("Songti SC", size: 12))
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+            Spacer(minLength: 8)
+            Button("给我线索") {
                 model.revealMemoryHelp()
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.large)
             .disabled(model.snapshot.word == nil)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(model.snapshot.word == nil ? "先等待墨墨显示当前词" : "还没有这个词的记忆卡")
-                .font(.subheadline.weight(.semibold))
-            Text("生成后先看一个通性的核心关系，再看它怎样进入不同句子。记法可选，只有你的反馈才会成为个人记录。")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.68))
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("还没有这个词的线索")
+                .font(.custom("Songti SC", size: 17))
+            Button(model.modelIsConfigured ? "生成一条线索" : "配置模型") {
+                if model.modelIsConfigured { model.generateMemoryCard() }
+                else { model.openSettings() }
+            }
+            .buttonStyle(.bordered)
         }
     }
 
     @ViewBuilder
-    private func cardContents(_ card: MemoryCard) -> some View {
-        VStack(alignment: .leading, spacing: 13) {
-            VStack(alignment: .leading, spacing: 6) {
-                sectionLabel("一个核心关系")
-                Text(card.coreConcept)
-                    .font(.title3.weight(.semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(card.coreImage)
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.76))
+    private func quickCard(_ card: MemoryCard) -> some View {
+        VStack(alignment: .leading, spacing: 15) {
+            sectionLabel("抓住一个核心")
+            Text(card.coreConcept)
+                .font(.custom("Songti SC", size: 21))
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let branch = model.selectedBranch {
+                Divider().overlay(.white.opacity(0.12))
+                Text(branch.context)
+                    .font(.system(size: 16, weight: .regular, design: .serif))
+                    .textSelection(.enabled)
+                Text("→ \(branch.chineseMeaning)")
+                    .font(.custom("Songti SC", size: 15))
+                    .foregroundStyle(.white.opacity(0.75))
             }
 
-            Divider().overlay(.white.opacity(0.15))
+            if helpIndex > 0 {
+                oneMoreCue(card)
+            }
 
-            VStack(alignment: .leading, spacing: 10) {
-                sectionLabel("放进句子，意思怎样变")
-                ForEach(card.branches) { branch in
-                    Button { model.selectBranch(branch) } label: {
-                        branchRow(branch, isSelected: model.selectedBranch?.id == branch.id)
-                    }
-                    .buttonStyle(.plain)
+            HStack(spacing: 16) {
+                Button(helpIndex == 0 ? "换个说法" : "再换一条") {
+                    showNextCue(card)
+                }
+                .buttonStyle(.bordered)
+                Spacer(minLength: 0)
+                Button(isDeepDiveOpen ? "收起更多" : "深入理解") {
+                    isDeepDiveOpen.toggle()
+                }
+                .buttonStyle(.plain)
+                .font(.custom("Songti SC", size: 13))
+                .foregroundStyle(.white.opacity(0.7))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func oneMoreCue(_ card: MemoryCard) -> some View {
+        let hasImage = !card.coreImage.isEmpty
+        let methodIndex = helpIndex - (hasImage ? 2 : 1)
+        VStack(alignment: .leading, spacing: 5) {
+            if hasImage && helpIndex == 1 {
+                sectionLabel("换个画面")
+                Text(card.coreImage)
+                    .font(.custom("Songti SC", size: 15))
+            } else if card.methods.indices.contains(methodIndex) {
+                let method = card.methods[methodIndex]
+                sectionLabel(method.kind.label)
+                Text(method.cue)
+                    .font(.custom("Songti SC", size: 15))
+                if !method.isLanguageFact {
+                    Text("辅助联想，不是词源或标准发音")
+                        .font(.custom("Songti SC", size: 11))
+                        .foregroundStyle(.white.opacity(0.55))
                 }
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+    }
 
+    private func showNextCue(_ card: MemoryCard) {
+        let count = card.methods.count + (card.coreImage.isEmpty ? 0 : 1)
+        guard count > 0 else { return }
+        helpIndex = helpIndex % count + 1
+    }
+
+    private func deepDive(_ card: MemoryCard) -> some View {
+        VStack(alignment: .leading, spacing: 15) {
+            Divider().overlay(.white.opacity(0.15))
+            sectionLabel("其他语境")
+            ForEach(card.branches) { branch in
+                Button {
+                    model.selectBranch(branch)
+                    helpIndex = 0
+                } label: {
+                    branchRow(branch, isSelected: model.selectedBranch?.id == branch.id)
+                }
+                .buttonStyle(.plain)
+            }
             if let branch = model.selectedBranch {
                 branchDetails(branch)
                 memoryMethods(card.methods)
@@ -107,12 +167,12 @@ struct MemoryPanelView: View {
                 }
                 feedbackSection
             }
-
             if let caveat = card.caveat, !caveat.isEmpty {
                 Text("待核验：\(caveat)")
                     .font(.caption2)
                     .foregroundStyle(.orange.opacity(0.9))
             }
+            generationControls
         }
     }
 

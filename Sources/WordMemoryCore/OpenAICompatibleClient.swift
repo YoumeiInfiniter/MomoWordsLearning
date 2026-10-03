@@ -29,6 +29,19 @@ public enum ModelSecretStore {
     private static let service = "local.maimemo.companion.model"
     private static let account = "api-key"
 
+    /// Read only item metadata; never decrypt the saved key just to draw settings UI.
+    public static func exists() -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
+    }
+
     public static func save(_ key: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

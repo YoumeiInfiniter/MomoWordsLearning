@@ -29,11 +29,16 @@ final class CompanionViewModel: ObservableObject {
     @Published var enteredAPIKey = ""
     @Published private(set) var hasStoredAPIKey: Bool
     @Published private(set) var isCheckingStoredAPIKey = true
+    @Published var enteredImageAPIKey = ""
+    @Published private(set) var hasStoredImageAPIKey = false
+    @Published private(set) var isCheckingImageAPIKey = true
+    @Published private(set) var isSavingImageKey = false
+    @Published var imageSettingsMessage: String?
 
     let reader: MaimemoAccessibilityReader
     let memoryStore: MemoryStore
     let imageStore: MemoryImageStore
-    let imageGenerator: (any MemoryImageGenerator)?
+    private let injectedImageGenerator: (any MemoryImageGenerator)?
     private var previousWord: String?
     private var lastScanSnapshot: MaimemoAXSnapshot
     private let modelClient = OpenAICompatibleClient()
@@ -45,12 +50,15 @@ final class CompanionViewModel: ObservableObject {
 
     var isGenerating: Bool { generatingWord == snapshot.word && generatingWord != nil }
     var isGeneratingCurrentImage: Bool { imageGeneratingWord == snapshot.word && imageGeneratingWord != nil }
+    var imageGenerator: (any MemoryImageGenerator)? {
+        injectedImageGenerator ?? (hasStoredImageAPIKey ? MaiziImageGenerator() : nil)
+    }
 
     init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore(), imageStore: MemoryImageStore = MemoryImageStore(), imageGenerator: (any MemoryImageGenerator)? = nil) {
         self.reader = reader
         self.memoryStore = memoryStore
         self.imageStore = imageStore
-        self.imageGenerator = imageGenerator
+        self.injectedImageGenerator = imageGenerator
         self.endpointText = UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
         self.modelText = UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
         self.hasStoredAPIKey = false
@@ -78,6 +86,15 @@ final class CompanionViewModel: ObservableObject {
             self.isCheckingStoredAPIKey = false
             self.generateRevealedCardIfNeeded()
         }
+        Task { [weak self] in
+            let exists = await Task.detached(priority: .utility) {
+                ImageSecretStore.exists()
+            }.value
+            guard let self else { return }
+            self.hasStoredImageAPIKey = exists
+            self.isCheckingImageAPIKey = false
+            if let card = self.memoryCard { self.generateImageIfNeeded(for: card) }
+        }
     }
 
     func refresh() async -> MaimemoAXSnapshot {
@@ -92,6 +109,10 @@ final class CompanionViewModel: ObservableObject {
         }
         isShowingLastCapturedWord = false
         if next.word != previousWord, next.word != nil {
+            imageGenerationTask?.cancel()
+            imageGenerationTask = nil
+            activeImageGenerationID = nil
+            imageGeneratingWord = nil
             lastChangeAt = Date()
             isMemoryRevealed = false
             selectedMethodKind = nil
@@ -110,6 +131,10 @@ final class CompanionViewModel: ObservableObject {
                 }
             }
         } else if next.word == nil, previousWord != nil {
+            imageGenerationTask?.cancel()
+            imageGenerationTask = nil
+            activeImageGenerationID = nil
+            imageGeneratingWord = nil
             memoryCard = nil
             memoryImageURL = nil
             imageError = nil
@@ -148,6 +173,7 @@ final class CompanionViewModel: ObservableObject {
     func returnToLearning() {
         showSettings = false
         generateRevealedCardIfNeeded()
+        if let card = memoryCard { generateImageIfNeeded(for: card) }
     }
 
     private func generateRevealedCardIfNeeded() {
@@ -190,6 +216,30 @@ final class CompanionViewModel: ObservableObject {
                 settingsMessage = hasStoredAPIKey ? "模型设置已保存在本机" : "地址与模型已保存；还需要 API Key 才能生成"
             } catch {
                 settingsMessage = "API Key 无法保存到钥匙串：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func saveImageSettings() {
+        guard !isSavingImageKey else { return }
+        let key = enteredImageAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            imageSettingsMessage = hasStoredImageAPIKey ? "图片生成 Key 已保存；无需重复输入" : "请填写图片生成 API Key"
+            return
+        }
+        isSavingImageKey = true
+        imageSettingsMessage = nil
+        Task { @MainActor in
+            defer { isSavingImageKey = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try ImageSecretStore.save(key)
+                }.value
+                enteredImageAPIKey = ""
+                hasStoredImageAPIKey = true
+                imageSettingsMessage = "图片生成 Key 已保存在本机钥匙串"
+            } catch {
+                imageSettingsMessage = "图片生成 Key 保存失败：\(error.localizedDescription)"
             }
         }
     }
@@ -549,9 +599,39 @@ struct SidebarView: View {
             }
             .padding(20)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+            imageSettingsCard
             permissionCard
             debugCard
         }
+    }
+
+    private var imageSettingsCard: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Text("字母插画")
+                .font(.custom("Songti SC", size: 21))
+            Text("gpt-image-2.5 · 1:1 · 1K · 每次一张。只在你主动查看、模型选中插画且本机没有缓存时调用图片服务。")
+                .font(.custom("Songti SC", size: 13))
+                .foregroundStyle(muted)
+            SecureField(model.hasStoredImageAPIKey ? "图片生成 Key 已保存；留空沿用" : "图片生成 API Key", text: $model.enteredImageAPIKey)
+                .textFieldStyle(.roundedBorder)
+                .disabled(model.isSavingImageKey)
+            HStack(spacing: 10) {
+                Button("保存图片 Key") { model.saveImageSettings() }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isSavingImageKey)
+                if model.isSavingImageKey { ProgressView().controlSize(.small) }
+            }
+            if let message = model.imageSettingsMessage {
+                Text(message)
+                    .font(.custom("Songti SC", size: 12))
+                    .foregroundStyle(accent)
+            }
+            Text("图片服务与记忆模型分别配置；密钥仅存于 macOS 钥匙串，生成图片保存在本机。首次生成和手动重试都可能产生费用。")
+                .font(.custom("Songti SC", size: 12))
+                .foregroundStyle(muted)
+        }
+        .padding(20)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
     }
 
     private var debugCard: some View {

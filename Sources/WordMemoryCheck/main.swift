@@ -13,7 +13,8 @@ struct WordMemoryCheck {
         try verifyHistory()
         try preventOverwriteOfUnreadableHistory()
         try verifyImageStorage()
-        print("word-memory-check: 通过 SSE 分帧、主联想、旧卡兼容、图片存储与历史检查")
+        try verifyMaiziImageResponse()
+        print("word-memory-check: 通过 SSE 分帧、主联想、旧卡兼容、图片响应、图片存储与历史检查")
     }
 
     private static func validateSSEFraming() throws {
@@ -202,6 +203,25 @@ struct WordMemoryCheck {
             try store.save(Data("not an image".utf8), for: "state", prompt: "bad")
             throw CheckError.failed("无效图片被写入缓存")
         } catch MemoryImageStore.ImageError.invalidImage { }
+    }
+
+    private static func verifyMaiziImageResponse() throws {
+        let urlResponse = Data(#"{"data":[{"url":"https://example.com/image.png"}]}"#.utf8)
+        guard try MaiziImageResponseParser.parse(urlResponse) == .url(URL(string: "https://example.com/image.png")!) else {
+            throw CheckError.failed("图片服务 URL 响应未正确解析")
+        }
+        let base64Response = Data(#"{"data":[{"b64_json":"data:image/png;base64,AQID"}]}"#.utf8)
+        guard try MaiziImageResponseParser.parse(base64Response) == .imageData(Data([1, 2, 3])) else {
+            throw CheckError.failed("图片服务 base64 响应未正确解析")
+        }
+        do {
+            _ = try MaiziImageResponseParser.parse(Data(#"{"data":[{"url":"http://example.com/image.png"}]}"#.utf8))
+            throw CheckError.failed("不安全的图片 URL 未被拒绝")
+        } catch MaiziImageError.unsafeImageURL { }
+        do {
+            _ = try MaiziImageResponseParser.parse(Data(#"{"data":[{}]}"#.utf8))
+            throw CheckError.failed("缺少图片数据的响应未被拒绝")
+        } catch MaiziImageError.invalidResponse { }
     }
 
     private static func sampleCard() -> MemoryCard {

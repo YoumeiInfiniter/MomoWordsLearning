@@ -90,7 +90,11 @@ struct MemoryLinkPanelView: View {
                     .tracking(2)
                     .frame(maxWidth: .infinity, minHeight: 110)
                     .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
-                if model.isGeneratingCurrentImage {
+                if model.isCheckingImageAPIKey {
+                    Text("正在确认图片服务…")
+                        .font(.custom("Songti SC", size: 11))
+                        .foregroundStyle(.white.opacity(0.53))
+                } else if model.isGeneratingCurrentImage {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("正在绘制字母插画…")
@@ -102,8 +106,14 @@ struct MemoryLinkPanelView: View {
                         .foregroundStyle(.orange)
                     Button("重试插画") { model.retryMemoryImage() }
                         .buttonStyle(.bordered)
+                } else if model.imageGenerator == nil {
+                    Text("未配置图片生成 Key，先看构图联想")
+                        .font(.custom("Songti SC", size: 11))
+                        .foregroundStyle(.white.opacity(0.53))
+                    Button("配置图片服务") { model.openSettings() }
+                        .buttonStyle(.bordered)
                 } else {
-                    Text(model.imageGenerator == nil ? "插画服务尚未接入，先看构图联想" : "插画将在联想确认后生成")
+                    Text("插画将在联想确认后生成")
                         .font(.custom("Songti SC", size: 11))
                         .foregroundStyle(.white.opacity(0.53))
                 }

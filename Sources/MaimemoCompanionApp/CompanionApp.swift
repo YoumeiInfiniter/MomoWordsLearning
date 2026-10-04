@@ -9,6 +9,9 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var diagnosticSnapshot: MaimemoAXSnapshot
     @Published private(set) var lastChangeAt: Date?
     @Published private(set) var memoryCard: MemoryCard?
+    @Published private(set) var memoryImageURL: URL?
+    @Published private(set) var imageGeneratingWord: String?
+    @Published var imageError: String?
     @Published private(set) var isMemoryRevealed = false
     @Published private(set) var isShowingLastCapturedWord = false
     @Published private(set) var selectedBranchID: String?
@@ -29,18 +32,25 @@ final class CompanionViewModel: ObservableObject {
 
     let reader: MaimemoAccessibilityReader
     let memoryStore: MemoryStore
+    let imageStore: MemoryImageStore
+    let imageGenerator: (any MemoryImageGenerator)?
     private var previousWord: String?
     private var lastScanSnapshot: MaimemoAXSnapshot
     private let modelClient = OpenAICompatibleClient()
     private var quickHints: [String: QuickMemoryHint] = [:]
     private var generationTask: Task<Void, Never>?
     private var activeGenerationID: UUID?
+    private var imageGenerationTask: Task<Void, Never>?
+    private var activeImageGenerationID: UUID?
 
     var isGenerating: Bool { generatingWord == snapshot.word && generatingWord != nil }
+    var isGeneratingCurrentImage: Bool { imageGeneratingWord == snapshot.word && imageGeneratingWord != nil }
 
-    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore()) {
+    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore(), imageStore: MemoryImageStore = MemoryImageStore(), imageGenerator: (any MemoryImageGenerator)? = nil) {
         self.reader = reader
         self.memoryStore = memoryStore
+        self.imageStore = imageStore
+        self.imageGenerator = imageGenerator
         self.endpointText = UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
         self.modelText = UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
         self.hasStoredAPIKey = false
@@ -88,6 +98,8 @@ final class CompanionViewModel: ObservableObject {
             memoryError = memoryStore.loadWarning
             if let word = next.word {
                 memoryCard = memoryStore.card(for: word)
+                memoryImageURL = memoryCard.flatMap { imageURL(for: $0) }
+                imageError = nil
                 quickHint = quickHints[word.lowercased()]
                 selectedBranchID = memoryCard?.branches.first?.id
                 showAnswer = false
@@ -99,6 +111,8 @@ final class CompanionViewModel: ObservableObject {
             }
         } else if next.word == nil, previousWord != nil {
             memoryCard = nil
+            memoryImageURL = nil
+            imageError = nil
             quickHint = nil
             selectedBranchID = nil
             isMemoryRevealed = false
@@ -128,6 +142,7 @@ final class CompanionViewModel: ObservableObject {
         guard snapshot.word != nil, !isMemoryRevealed else { return }
         isMemoryRevealed = true
         generateRevealedCardIfNeeded()
+        if let card = memoryCard { generateImageIfNeeded(for: card) }
     }
 
     func returnToLearning() {
@@ -233,9 +248,11 @@ final class CompanionViewModel: ObservableObject {
                 quickHints.removeValue(forKey: word.lowercased())
                 if snapshot.word == word {
                     memoryCard = card
+                    memoryImageURL = imageURL(for: card)
                     quickHint = nil
                     selectedBranchID = card.branches.first?.id
                     showAnswer = false
+                    generateImageIfNeeded(for: card)
                 }
             } catch {
                 if activeGenerationID == generationID && !Task.isCancelled {
@@ -263,6 +280,56 @@ final class CompanionViewModel: ObservableObject {
         activeGenerationID = nil
         generatingWord = nil
         generationTask = nil
+    }
+
+    private func imageURL(for card: MemoryCard) -> URL? {
+        guard card.anchor?.kind == .letterIllustration,
+              let prompt = card.anchor?.imagePrompt else { return nil }
+        return imageStore.imageURL(for: card.word, prompt: prompt)
+    }
+
+    private func generateImageIfNeeded(for card: MemoryCard) {
+        guard isMemoryRevealed, snapshot.word == card.word,
+              card.anchor?.kind == .letterIllustration,
+              let prompt = card.anchor?.imagePrompt,
+              let imageGenerator,
+              imageStore.imageURL(for: card.word, prompt: prompt) == nil else { return }
+        if imageGeneratingWord == card.word { return }
+        imageGenerationTask?.cancel()
+        let generationID = UUID()
+        activeImageGenerationID = generationID
+        imageGeneratingWord = card.word
+        imageError = nil
+        let imageStore = self.imageStore
+        imageGenerationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let image = try await imageGenerator.generateImage(prompt: prompt)
+                try Task.checkCancellation()
+                guard activeImageGenerationID == generationID else { return }
+                let url = try await Task.detached(priority: .utility) {
+                    try imageStore.save(image, for: card.word, prompt: prompt)
+                }.value
+                try Task.checkCancellation()
+                if activeImageGenerationID == generationID && snapshot.word == card.word {
+                    memoryImageURL = url
+                }
+            } catch {
+                if activeImageGenerationID == generationID && !Task.isCancelled && snapshot.word == card.word {
+                    imageError = error.localizedDescription
+                }
+            }
+            if activeImageGenerationID == generationID {
+                activeImageGenerationID = nil
+                imageGeneratingWord = nil
+                imageGenerationTask = nil
+            }
+        }
+    }
+
+    func retryMemoryImage() {
+        guard let card = memoryCard else { return }
+        generateImageIfNeeded(for: card)
     }
 
     func selectBranch(_ branch: MeaningBranch) {
@@ -346,7 +413,7 @@ struct SidebarView: View {
                             }
                             if model.isMemoryRevealed {
                                 wordCard
-                                MemoryPanelView(model: model)
+                                MemoryLinkPanelView(model: model)
                             } else {
                                 revealSurface(minHeight: geometry.size.height - 140)
                             }
@@ -367,7 +434,7 @@ struct SidebarView: View {
         } label: {
             VStack(alignment: .leading, spacing: 24) {
                 wordCard
-                MemoryPanelView(model: model)
+                MemoryLinkPanelView(model: model)
             }
             .frame(maxWidth: .infinity, minHeight: max(0, minHeight), alignment: .topLeading)
             .contentShape(Rectangle())

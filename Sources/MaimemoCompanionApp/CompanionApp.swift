@@ -13,6 +13,7 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var imageGeneratingWord: String?
     @Published var imageError: String?
     @Published private(set) var isMemoryRevealed = false
+    @Published private(set) var selectedAnchorKind: MemoryAnchorKind = .sound
     @Published private(set) var isShowingLastCapturedWord = false
     @Published private(set) var selectedBranchID: String?
     @Published private(set) var quickHint: QuickMemoryHint?
@@ -45,6 +46,8 @@ final class CompanionViewModel: ObservableObject {
     private var quickHints: [String: QuickMemoryHint] = [:]
     private var generationTask: Task<Void, Never>?
     private var activeGenerationID: UUID?
+    private var generatingAnchorKind: MemoryAnchorKind?
+    private var imageSelectionIntent: String?
     private var imageGenerationTask: Task<Void, Never>?
     private var activeImageGenerationID: UUID?
 
@@ -93,7 +96,6 @@ final class CompanionViewModel: ObservableObject {
             guard let self else { return }
             self.hasStoredImageAPIKey = exists
             self.isCheckingImageAPIKey = false
-            if let card = self.memoryCard { self.generateImageIfNeeded(for: card) }
         }
     }
 
@@ -109,6 +111,7 @@ final class CompanionViewModel: ObservableObject {
         }
         isShowingLastCapturedWord = false
         if next.word != previousWord, next.word != nil {
+            imageSelectionIntent = nil
             imageGenerationTask?.cancel()
             imageGenerationTask = nil
             activeImageGenerationID = nil
@@ -119,6 +122,7 @@ final class CompanionViewModel: ObservableObject {
             memoryError = memoryStore.loadWarning
             if let word = next.word {
                 memoryCard = memoryStore.card(for: word)
+                selectedAnchorKind = memoryCard?.anchor?.kind ?? .sound
                 memoryImageURL = memoryCard.flatMap { imageURL(for: $0) }
                 imageError = nil
                 quickHint = quickHints[word.lowercased()]
@@ -131,11 +135,13 @@ final class CompanionViewModel: ObservableObject {
                 }
             }
         } else if next.word == nil, previousWord != nil {
+            imageSelectionIntent = nil
             imageGenerationTask?.cancel()
             imageGenerationTask = nil
             activeImageGenerationID = nil
             imageGeneratingWord = nil
             memoryCard = nil
+            selectedAnchorKind = .sound
             memoryImageURL = nil
             imageError = nil
             quickHint = nil
@@ -167,19 +173,49 @@ final class CompanionViewModel: ObservableObject {
         guard snapshot.word != nil, !isMemoryRevealed else { return }
         isMemoryRevealed = true
         generateRevealedCardIfNeeded()
-        if let card = memoryCard { generateImageIfNeeded(for: card) }
     }
 
     func returnToLearning() {
         showSettings = false
         generateRevealedCardIfNeeded()
-        if let card = memoryCard { generateImageIfNeeded(for: card) }
     }
 
     private func generateRevealedCardIfNeeded() {
         guard snapshot.word != nil, isMemoryRevealed, !showSettings,
               memoryCard == nil, quickHint == nil, !isGenerating, modelIsConfigured else { return }
         generateMemoryCard()
+    }
+
+    func chooseAnchor(_ kind: MemoryAnchorKind) {
+        guard isMemoryRevealed, let word = snapshot.word else { return }
+        selectedAnchorKind = kind
+        imageError = nil
+        imageSelectionIntent = kind == .letterIllustration ? word : nil
+        if let card = memoryCard, let selected = card.selectingAnchor(kind) {
+            if generatingWord == word {
+                generationTask?.cancel()
+                generationTask = nil
+                activeGenerationID = nil
+                generatingWord = nil
+                generatingAnchorKind = nil
+                quickHint = nil
+                quickHints.removeValue(forKey: word.lowercased())
+            }
+            do {
+                if card.anchor?.kind != kind { try memoryStore.save(selected) }
+                memoryCard = selected
+                memoryImageURL = imageURL(for: selected)
+                if kind == .letterIllustration {
+                    imageSelectionIntent = nil
+                    generateImageIfNeeded(for: selected)
+                }
+            } catch {
+                imageSelectionIntent = nil
+                memoryError = "联想方式保存失败：\(error.localizedDescription)"
+            }
+        } else {
+            generateMemoryCard(requestedAnchorKind: kind, switchingAnchor: memoryCard != nil)
+        }
     }
 
     func saveModelSettings() {
@@ -244,9 +280,10 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
-    func generateMemoryCard() {
+    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false) {
         guard let word = snapshot.word else { return }
-        if generatingWord == word { return }
+        let anchorKind = requestedAnchorKind ?? selectedAnchorKind
+        if generatingWord == word && generatingAnchorKind == anchorKind { return }
         let modelName = modelText
         guard let url = URL(string: endpointText), !modelName.isEmpty else {
             openSettings()
@@ -261,8 +298,10 @@ final class CompanionViewModel: ObservableObject {
             preferredMethod: selectedMethodKind,
             previousMethod: previous?.methodVersions.last?.method.cue,
             existingCard: memoryCard,
-            focusMeaningKey: selectedBranch?.meaningKey
+            focusMeaningKey: switchingAnchor ? nil : selectedBranch?.meaningKey,
+            preferredAnchorKind: anchorKind
         )
+        let existingCard = switchingAnchor ? memoryCard : nil
         if let oldWord = generatingWord {
             generationTask?.cancel()
             quickHints.removeValue(forKey: oldWord.lowercased())
@@ -271,6 +310,7 @@ final class CompanionViewModel: ObservableObject {
         let generationID = UUID()
         activeGenerationID = generationID
         generatingWord = word
+        generatingAnchorKind = anchorKind
         quickHint = nil
         memoryError = nil
         generationTask = Task { [weak self] in
@@ -289,20 +329,28 @@ final class CompanionViewModel: ObservableObject {
                 try Task.checkCancellation()
                 guard activeGenerationID == generationID else { return }
                 let configuration = ModelConfiguration(endpoint: url, model: modelName, apiKey: key)
-                let card = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
+                let generated = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
                     await self?.receiveQuickHint(hint, generationID: generationID)
                 }
                 try Task.checkCancellation()
                 guard activeGenerationID == generationID else { return }
+                let card = if let existingCard {
+                    generated.withAlternateAnchor(existingCard.anchor(for: anchorKind == .sound ? .letterIllustration : .sound))
+                } else {
+                    generated
+                }
                 try memoryStore.save(card)
                 quickHints.removeValue(forKey: word.lowercased())
-                if snapshot.word == word {
+                if snapshot.word == word && selectedAnchorKind == anchorKind {
                     memoryCard = card
                     memoryImageURL = imageURL(for: card)
                     quickHint = nil
                     selectedBranchID = card.branches.first?.id
                     showAnswer = false
-                    generateImageIfNeeded(for: card)
+                    if anchorKind == .letterIllustration && imageSelectionIntent == word {
+                        imageSelectionIntent = nil
+                        generateImageIfNeeded(for: card)
+                    }
                 }
             } catch {
                 if activeGenerationID == generationID && !Task.isCancelled {
@@ -329,6 +377,7 @@ final class CompanionViewModel: ObservableObject {
         guard activeGenerationID == generationID else { return }
         activeGenerationID = nil
         generatingWord = nil
+        generatingAnchorKind = nil
         generationTask = nil
     }
 
@@ -375,11 +424,6 @@ final class CompanionViewModel: ObservableObject {
                 imageGenerationTask = nil
             }
         }
-    }
-
-    func retryMemoryImage() {
-        guard let card = memoryCard else { return }
-        generateImageIfNeeded(for: card)
     }
 
     func selectBranch(_ branch: MeaningBranch) {
@@ -609,7 +653,7 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 13) {
             Text("字母插画")
                 .font(.custom("Songti SC", size: 21))
-            Text("gpt-image-2.5 · 1:1 · 1K · 每次一张。只在你主动查看、模型选中插画且本机没有缓存时调用图片服务。")
+            Text("gpt-image-2.5 · 1:1 · 1K · 每次一张。只有你主动选择插画且本机没有缓存时才会调用图片服务。")
                 .font(.custom("Songti SC", size: 13))
                 .foregroundStyle(muted)
             SecureField(model.hasStoredImageAPIKey ? "图片生成 Key 已保存；留空沿用" : "图片生成 API Key", text: $model.enteredImageAPIKey)

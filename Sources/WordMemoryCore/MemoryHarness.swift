@@ -24,8 +24,9 @@ public struct MemoryRequest: Sendable {
     public let previousMethod: String?
     public let existingCard: MemoryCard?
     public let focusMeaningKey: String?
+    public let preferredAnchorKind: MemoryAnchorKind
 
-    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil) {
+    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil, preferredAnchorKind: MemoryAnchorKind = .sound) {
         self.word = word
         self.learnerNote = learnerNote
         self.previousReason = previousReason
@@ -33,6 +34,7 @@ public struct MemoryRequest: Sendable {
         self.previousMethod = previousMethod
         self.existingCard = existingCard
         self.focusMeaningKey = focusMeaningKey
+        self.preferredAnchorKind = preferredAnchorKind
     }
 }
 
@@ -40,9 +42,9 @@ public enum MemoryHarness {
     public static let systemInstructions = """
     你是面向中国考研英语二阅读的词汇记忆教练。目标是在新句中识别当句义项，不是背完词典。
     严格按以下顺序思考，但只输出 JSON：
-    1. 找一个真实且可迁移的核心语义关系；如果不同义项确实不相连，明确在 caveat 说明，不编造统一故事。
-    2. 为“英文词形／声音 → 核心语义”只选一个主钩子 anchor：sound 或 letterIllustration，不能同时展示两种。sound 要有与读音大致相近、且能自然指向核心意思的中文短句；不能冒充标准发音或词源。若谐音牵强，就选 letterIllustration，不要硬编。letterIllustration 要把当前英文词的字母按原顺序融入一幅能表达核心关系的趣味图；imagePrompt 用英文写具体画面、字母造型、构图和禁止拼错/多余文字，cue 和 explanation 用简短中文解释视觉关联。
-    3. 只选当前最有帮助的一个常见语境分支，给简短英文句子、可观察信号、当句中文意思，并说明核心关系如何在这里落地；不要堆叠中文同义词，也不要替代背词软件的词典。
+    1. 找一个真实且可迁移的核心语义关系，优先检查常见名词、动词、形容词等用法；如果不同义项确实不相连，明确在 caveat 说明，不编造统一故事。
+    2. 为“英文词形／声音 → 核心语义”写一个主钩子 anchor，kind 必须严格等于用户指定的类型，不能自行改成另一种。sound 要有与读音大致相近、且能自然指向可迁移核心意思的中文短句；不能冒充标准发音或词源，不要为了押音硬编不通的句子。若确实没有可信的谐音，就在 cue 简短写“暂无自然谐音”，在 explanation 说明原因，不要伪造发音。letterIllustration 要把当前英文词的字母按原顺序融入一幅能表达核心关系的趣味图；若单词兼有抽象或动词义，画面不能只画具体名词物品，应提供能连接这些义项的动作或关系。imagePrompt 用英文写具体画面、字母造型、构图和禁止拼错／多余文字，cue 和 explanation 用简短中文解释视觉关联。
+    3. 只选当前最有帮助的一个常见语境分支，给简短英文句子、可观察信号、当句中文意思，并说明核心关系如何在这里落地；若直观名词义已由背词软件展示，而这个词还有常见抽象动词／形容词义，优先用后者检验核心关系。不要堆叠中文同义词，也不要替代背词软件的词典。
     4. 其他记忆方法只作为内部候选，不在主界面罗列；谐音、拆字或画面联想不能冒充语言事实。
     5. 给一个自编、简短、纯英文的新句用于内部迁移检查。answer 和 clue 单独提供。句子不能只是前面情境句换几个无关词。
     6. 只把用户明确提供的感受和困难当成用户事实；没有反馈时所有方法都只是待试用建议。不确定的词源或罕见义项宁可不写。
@@ -61,17 +63,18 @@ public enum MemoryHarness {
         当前单词：\(request.word)
         用户原话／卡点：\(note.isEmpty ? "未提供" : note)
         上次遗忘原因：\(request.previousReason?.label ?? "未记录")
-        想尝试的记法：\(request.preferredMethod?.label ?? "由你判断")
+        用户指定的主联想：\(request.preferredAnchorKind.rawValue)（必须保持，不可自行改选）
+        想尝试的其他记法：\(request.preferredMethod?.label ?? "未指定")
         旧记法（若无效请改对应部分）：\(request.previousMethod ?? "无")
         已有核心关系：\(request.existingCard?.coreConcept ?? "无")
         已有义项键：\(previousBranches)
         本次重点义项键：\(request.focusMeaningKey ?? "未指定")
-        只处理这个词。若用户说名词会、动词忘，只优先重做动词分支；保留有效的核心关系。
+        只处理这个词。主联想要帮助记住核心关系，不要仅描绘某一个名词义。已有核心关系若只覆盖具体名词而遗漏常见动词／形容词义，请修正为更可迁移的关系；确实不能相连的义项写入 caveat，不能硬凑。若用户说名词会、动词忘，只优先重做动词分支；保留仍然有效的部分。
         重做记法时必须保留本次重点义项的 meaningKey，未变化的义项也沿用原 meaningKey，避免丢失个人反馈历史。
         """
     }
 
-    public static func parse(_ raw: String, expectedWord: String, requiredMeaningKey: String? = nil) throws -> MemoryCard {
+    public static func parse(_ raw: String, expectedWord: String, requiredMeaningKey: String? = nil, requiredAnchorKind: MemoryAnchorKind? = nil) throws -> MemoryCard {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let json: String
         if trimmed.hasPrefix("```") {
@@ -94,6 +97,12 @@ public enum MemoryHarness {
               !anchor.cue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !anchor.explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MemoryHarnessError.invalidResponse("单词与核心意思之间缺少主联想")
+        }
+        if let requiredAnchorKind, anchor.kind != requiredAnchorKind {
+            throw MemoryHarnessError.invalidResponse("模型没有按用户选择生成\(requiredAnchorKind.label)")
+        }
+        guard card.alternateAnchor == nil else {
+            throw MemoryHarnessError.invalidResponse("模型不应自行附加第二种联想")
         }
         switch anchor.kind {
         case .sound:

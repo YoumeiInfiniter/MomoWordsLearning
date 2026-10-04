@@ -125,7 +125,8 @@ public struct OpenAICompatibleClient: Sendable {
                 if let delta = try Self.streamContent(from: event.data) {
                     content += delta
                     if !didEmitHint,
-                       let hint = MemoryHarness.quickHint(from: content, expectedWord: request.word) {
+                       let hint = MemoryHarness.quickHint(from: content, expectedWord: request.word),
+                       hint.anchor.kind == request.preferredAnchorKind {
                         didEmitHint = true
                         await onQuickHint(hint)
                     }
@@ -144,7 +145,7 @@ public struct OpenAICompatibleClient: Sendable {
             content = fallbackContent
         }
         guard !content.isEmpty else { throw MemoryHarnessError.invalidResponse("模型未返回流式文本") }
-        return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey)
+        return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.preferredAnchorKind)
     }
 
     private static func streamContent(from payload: String) throws -> String? {
@@ -180,7 +181,7 @@ public struct OpenAICompatibleClient: Sendable {
         guard let content = completion.choices.first?.message.content else {
             throw MemoryHarnessError.invalidResponse("模型未返回文本")
         }
-        return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey)
+        return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.preferredAnchorKind)
     }
 }
 

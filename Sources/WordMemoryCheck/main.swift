@@ -8,13 +8,14 @@ struct WordMemoryCheck {
     static func main() throws {
         try validateCard()
         try validateLegacyCardDecoding()
+        try validateManualAnchorSelection()
         try validateStreamingHint()
         try validateSSEFraming()
         try verifyHistory()
         try preventOverwriteOfUnreadableHistory()
         try verifyImageStorage()
         try verifyMaiziImageResponse()
-        print("word-memory-check: 通过 SSE 分帧、主联想、旧卡兼容、图片响应、图片存储与历史检查")
+        print("word-memory-check: 通过 SSE 分帧、手动联想选择、旧卡兼容、图片响应、图片存储与历史检查")
     }
 
     private static func validateSSEFraming() throws {
@@ -128,9 +129,36 @@ struct WordMemoryCheck {
         object.removeValue(forKey: "anchor")
         let oldData = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONDecoder().decode(MemoryCard.self, from: oldData)
-        guard decoded.word == "state", decoded.anchor == nil else {
+        guard decoded.word == "state", decoded.anchor == nil, decoded.alternateAnchor == nil else {
             throw CheckError.failed("新版无法读取已有的旧记忆卡")
         }
+    }
+
+    private static func validateManualAnchorSelection() throws {
+        let sound = sampleCard().anchor!
+        let illustration = MemoryAnchor(kind: .letterIllustration,
+                                        cue: "字母画", explanation: "把字母变成关系画面",
+                                        imagePrompt: "Draw STATE as legible letter-shaped objects")
+        let card = sampleCard().replacingAnchor(illustration)
+        guard card.anchor == illustration, card.alternateAnchor == sound,
+              card.anchor(for: .sound) == sound,
+              card.selectingAnchor(.sound)?.anchor == sound,
+              card.selectingAnchor(.sound)?.alternateAnchor == illustration else {
+            throw CheckError.failed("两种联想切换时丢失了另一种方案")
+        }
+        let restored = try JSONDecoder().decode(MemoryCard.self, from: JSONEncoder().encode(card))
+        guard restored.anchor == illustration, restored.alternateAnchor == sound else {
+            throw CheckError.failed("两种联想未能持久化")
+        }
+        let request = MemoryRequest(word: "state", preferredAnchorKind: .sound)
+        guard MemoryHarness.userPrompt(request).contains("用户指定的主联想：sound") else {
+            throw CheckError.failed("用户选择没有进入模型提示词")
+        }
+        do {
+            _ = try MemoryHarness.parse(String(decoding: try JSONEncoder().encode(sampleCard()), as: UTF8.self),
+                                        expectedWord: "state", requiredAnchorKind: .letterIllustration)
+            throw CheckError.failed("模型擅自改换联想方式未被拒绝")
+        } catch MemoryHarnessError.invalidResponse { }
     }
 
     private static func verifyHistory() throws {

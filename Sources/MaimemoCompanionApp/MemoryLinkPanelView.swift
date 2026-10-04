@@ -11,15 +11,19 @@ struct MemoryLinkPanelView: View {
             if !model.isMemoryRevealed {
                 recallFirstState
             } else if let card = model.memoryCard {
+                anchorPicker
                 cardContent(card)
             } else if let hint = model.quickHint {
+                anchorPicker
                 anchorContent(hint.anchor, word: hint.word, imageURL: nil)
                 coreMeaning(hint.coreConcept)
                 if let branch = hint.branch { contextLine(branch) }
                 progressLine
             } else if model.isGenerating {
+                anchorPicker
                 progressLine
             } else {
+                anchorPicker
                 emptyState
             }
             if model.isMemoryRevealed, let error = model.memoryError {
@@ -33,6 +37,30 @@ struct MemoryLinkPanelView: View {
         .padding(22)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.12)))
+    }
+
+    private var anchorPicker: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                ForEach(MemoryAnchorKind.allCases, id: \.self) { kind in
+                    Button {
+                        model.chooseAnchor(kind)
+                    } label: {
+                        Text(kind == .sound ? "谐音" : "字母插画")
+                            .font(.custom("Songti SC", size: 13))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(model.selectedAnchorKind == kind ? .white.opacity(0.16) : .white.opacity(0.055), in: RoundedRectangle(cornerRadius: 11))
+                            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.white.opacity(model.selectedAnchorKind == kind ? 0.34 : 0.10)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(model.selectedAnchorKind == kind ? .isSelected : [])
+                }
+            }
+            Text("选择插画会直接生图，可能计费；已有图片会复用")
+                .font(.custom("Songti SC", size: 11))
+                .foregroundStyle(.white.opacity(0.52))
+        }
     }
 
     private var recallFirstState: some View {
@@ -58,17 +86,26 @@ struct MemoryLinkPanelView: View {
 
     @ViewBuilder
     private func cardContent(_ card: MemoryCard) -> some View {
-        if let anchor = card.anchor {
+        if let anchor = card.anchor(for: model.selectedAnchorKind) {
             anchorContent(anchor, word: card.word, imageURL: model.memoryImageURL)
+            coreMeaning(card.coreConcept)
+            if let branch = card.branches.first { contextLine(branch) }
+        } else if let hint = model.quickHint, hint.anchor.kind == model.selectedAnchorKind {
+            anchorContent(hint.anchor, word: hint.word, imageURL: nil)
+            coreMeaning(hint.coreConcept)
+            if let branch = hint.branch { contextLine(branch) }
+            if model.isGenerating { progressLine }
+        } else if model.isGenerating {
+            progressLine
         } else {
-            Text("这张旧卡还没有词形联想")
+            Text("这张卡还没有\(model.selectedAnchorKind.label)")
                 .font(.custom("Songti SC", size: 16))
-            Button("按新方式重做") { model.generateMemoryCard() }
+            Button("准备\(model.selectedAnchorKind.label)") { model.chooseAnchor(model.selectedAnchorKind) }
                 .buttonStyle(.bordered)
                 .disabled(model.isGenerating)
+            coreMeaning(card.coreConcept)
+            if let branch = card.branches.first { contextLine(branch) }
         }
-        coreMeaning(card.coreConcept)
-        if let branch = card.branches.first { contextLine(branch) }
     }
 
     @ViewBuilder
@@ -104,7 +141,7 @@ struct MemoryLinkPanelView: View {
                     Text("插画未完成：\(error)")
                         .font(.custom("Songti SC", size: 11))
                         .foregroundStyle(.orange)
-                    Button("重试插画") { model.retryMemoryImage() }
+                    Button("重试插画 · 可能计费") { model.chooseAnchor(.letterIllustration) }
                         .buttonStyle(.bordered)
                 } else if model.imageGenerator == nil {
                     Text("未配置图片生成 Key，先看构图联想")
@@ -113,7 +150,7 @@ struct MemoryLinkPanelView: View {
                     Button("配置图片服务") { model.openSettings() }
                         .buttonStyle(.bordered)
                 } else {
-                    Text("插画将在联想确认后生成")
+                    Text(model.isGenerating ? "联想补全后将开始生图…" : "点上方“字母插画”可生成图片")
                         .font(.custom("Songti SC", size: 11))
                         .foregroundStyle(.white.opacity(0.53))
                 }

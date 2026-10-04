@@ -16,6 +16,8 @@ struct MemoryPanelView: View {
                 if isDeepDiveOpen {
                     deepDive(card)
                 }
+            } else if let hint = model.quickHint {
+                quickHintCard(hint)
             } else if model.isGenerating {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
@@ -73,6 +75,36 @@ struct MemoryPanelView: View {
                 else { model.openSettings() }
             }
             .buttonStyle(.bordered)
+        }
+    }
+
+    private func quickHintCard(_ hint: QuickMemoryHint) -> some View {
+        VStack(alignment: .leading, spacing: 15) {
+            sectionLabel("抓住一个核心")
+            Text(hint.coreConcept)
+                .font(.custom("Songti SC", size: 21))
+                .fixedSize(horizontal: false, vertical: true)
+            Divider().overlay(.white.opacity(0.12))
+            Text(hint.branch.context)
+                .font(.system(size: 16, weight: .regular, design: .serif))
+                .textSelection(.enabled)
+            Text("→ \(hint.branch.chineseMeaning)")
+                .font(.custom("Songti SC", size: 15))
+                .foregroundStyle(.white.opacity(0.75))
+            HStack(spacing: 10) {
+                if model.isGenerating { ProgressView().controlSize(.small) }
+                Text("更多内容正在准备")
+                    .font(.custom("Songti SC", size: 12))
+                    .foregroundStyle(.white.opacity(0.62))
+                Spacer(minLength: 0)
+                Button(isDeepDiveOpen ? "已等待展开" : "深入理解") {
+                    isDeepDiveOpen = true
+                }
+                .buttonStyle(.plain)
+                .disabled(isDeepDiveOpen)
+                .font(.custom("Songti SC", size: 13))
+                .foregroundStyle(.white.opacity(0.7))
+            }
         }
     }
 

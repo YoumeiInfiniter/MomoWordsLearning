@@ -91,6 +91,19 @@ public struct MemoryCard: Codable, Hashable, Sendable {
     }
 }
 
+/// A provisional first clue. It is never persisted; only a fully validated card is saved.
+public struct QuickMemoryHint: Equatable, Sendable {
+    public let word: String
+    public let coreConcept: String
+    public let branch: MeaningBranch
+
+    public init(word: String, coreConcept: String, branch: MeaningBranch) {
+        self.word = word
+        self.coreConcept = coreConcept
+        self.branch = branch
+    }
+}
+
 public enum RecallResult: String, Codable, CaseIterable, Sendable {
     case recognized
     case uncertain

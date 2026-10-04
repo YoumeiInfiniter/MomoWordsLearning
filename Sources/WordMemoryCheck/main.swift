@@ -6,9 +6,32 @@ import WordMemoryCore
 struct WordMemoryCheck {
     static func main() throws {
         try validateCard()
+        try validateStreamingHint()
         try verifyHistory()
         try preventOverwriteOfUnreadableHistory()
-        print("word-memory-check: 通过结构校验、义项隔离与记法版本检查")
+        print("word-memory-check: 通过流式首条线索、结构校验、义项隔离与记法版本检查")
+    }
+
+    private static func validateStreamingHint() throws {
+        let prefix = #"{"word":"state","coreConcept":"把\"内容\"明确呈现","branches":[{"partOfSpeech":"noun","meaningKey":"condition","chineseMeaning":"状态","context":"The machine is in a good state.","signal":"a ... state","explanation":"描述所处状态"}"#
+        for index in prefix.indices {
+            guard MemoryHarness.quickHint(from: String(prefix[..<index]), expectedWord: "state") == nil else {
+                throw CheckError.failed("首个语境对象尚未完整时提前展示了线索")
+            }
+        }
+        guard let hint = MemoryHarness.quickHint(from: prefix, expectedWord: "state"),
+              hint.coreConcept == "把\"内容\"明确呈现",
+              hint.branch.context == "The machine is in a good state.",
+              hint.branch.chineseMeaning == "状态" else {
+            throw CheckError.failed("完整首条线索未能提前提取")
+        }
+        guard MemoryHarness.quickHint(from: prefix, expectedWord: "claim") == nil else {
+            throw CheckError.failed("其他单词的流式线索串到了当前词")
+        }
+        let complete = prefix + #"],"coreImage":"一幅画","methods":[{"id":"m1","kind":"context","title":"报告","cue":"state","whyItHelps":"搭配","isLanguageFact":true}],"transferCheck":{"sentence":"A sentence.","targetBranch":"condition","answer":"状态","clue":"a state"},"caveat":null}"#
+        guard try MemoryHarness.parse(complete, expectedWord: "state").word == "state" else {
+            throw CheckError.failed("流式拼接后的完整卡片未通过校验")
+        }
     }
 
     private static func validateCard() throws {

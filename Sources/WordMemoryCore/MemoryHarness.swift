@@ -46,8 +46,9 @@ public enum MemoryHarness {
     4. 给一个自编、简短、纯英文的新句用于迁移检查。answer 和 clue 单独提供，界面会先隐藏它们。句子不能只是前面情境句换几个无关词。
     5. 只把用户明确提供的感受和困难当成用户事实；没有反馈时所有方法都只是待试用建议。不要声称用户已掌握或某方法有效。
     6. 不确定的词源或罕见义项宁可不写；若重要事实需要核查，在 caveat 标出待核验。
+    输出字段按下面示例的顺序，不要在 JSON 前后添加说明；第一个 branches 对象优先写最有助于理解当前词的常见语境。
     返回一个 JSON object，字段精确为：
-    {"word":"英文词","coreConcept":"中文核心关系","coreImage":"一句简短画面","branches":[{"partOfSpeech":"词性","meaningKey":"简短稳定英文义项键","chineseMeaning":"当句中文意思","context":"自编英文短句","signal":"句中可观察信号","explanation":"核心关系如何在这里变义"}],"methods":[{"id":"m1","kind":"context|image|contrast|morphology|sound|personal","title":"短标题","cue":"具体记忆钩子","whyItHelps":"为什么有助于回忆","isLanguageFact":false}],"transferCheck":{"sentence":"自编英文新句","targetBranch":"与某个 meaningKey 完全一致","answer":"当句意思","clue":"句中判断线索"},"caveat":null}
+    {"word":"英文词","coreConcept":"中文核心关系","branches":[{"partOfSpeech":"词性","meaningKey":"简短稳定英文义项键","chineseMeaning":"当句中文意思","context":"自编英文短句","signal":"句中可观察信号","explanation":"核心关系如何在这里变义"}],"coreImage":"一句简短画面","methods":[{"id":"m1","kind":"context|image|contrast|morphology|sound|personal","title":"短标题","cue":"具体记忆钩子","whyItHelps":"为什么有助于回忆","isLanguageFact":false}],"transferCheck":{"sentence":"自编英文新句","targetBranch":"与某个 meaningKey 完全一致","answer":"当句意思","clue":"句中判断线索"},"caveat":null}
     """
 
     public static func userPrompt(_ request: MemoryRequest) -> String {
@@ -110,5 +111,100 @@ public enum MemoryHarness {
             throw MemoryHarnessError.invalidResponse("把个人联想误标为语言事实")
         }
         return card
+    }
+
+    /// Extracts only complete JSON values from a streaming prefix. A partial card is not trusted or saved.
+    public static func quickHint(from prefix: String, expectedWord: String) -> QuickMemoryHint? {
+        let bytes = Array(prefix.utf8)
+        guard let wordStart = topLevelValueStart("word", in: bytes),
+              let word = decodedString(at: wordStart, in: bytes),
+              word.caseInsensitiveCompare(expectedWord) == .orderedSame,
+              let conceptStart = topLevelValueStart("coreConcept", in: bytes),
+              let concept = decodedString(at: conceptStart, in: bytes),
+              !concept.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let branchesStart = topLevelValueStart("branches", in: bytes),
+              branchesStart < bytes.count, bytes[branchesStart] == 91 else { return nil }
+
+        var position = branchesStart + 1
+        while position < bytes.count && isWhitespace(bytes[position]) { position += 1 }
+        guard position < bytes.count, bytes[position] == 123,
+              let end = completeObjectEnd(at: position, in: bytes),
+              let branch = try? JSONDecoder().decode(MeaningBranch.self, from: Data(bytes[position...end])),
+              !branch.context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !branch.chineseMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !branch.meaningKey.isEmpty else { return nil }
+        return QuickMemoryHint(word: word, coreConcept: concept, branch: branch)
+    }
+
+    private static func topLevelValueStart(_ name: String, in bytes: [UInt8]) -> Int? {
+        var position = 0
+        var depth = 0
+        while position < bytes.count {
+            switch bytes[position] {
+            case 34:
+                guard let end = completeStringEnd(at: position, in: bytes) else { return nil }
+                if depth == 1,
+                   let key = try? JSONDecoder().decode(String.self, from: Data(bytes[position...end])),
+                   key == name {
+                    var value = end + 1
+                    while value < bytes.count && isWhitespace(bytes[value]) { value += 1 }
+                    if value < bytes.count && bytes[value] == 58 {
+                        value += 1
+                        while value < bytes.count && isWhitespace(bytes[value]) { value += 1 }
+                        return value < bytes.count ? value : nil
+                    }
+                }
+                position = end + 1
+                continue
+            case 123, 91: depth += 1
+            case 125, 93: depth -= 1
+            default: break
+            }
+            position += 1
+        }
+        return nil
+    }
+
+    private static func decodedString(at start: Int, in bytes: [UInt8]) -> String? {
+        guard start < bytes.count, bytes[start] == 34,
+              let end = completeStringEnd(at: start, in: bytes) else { return nil }
+        return try? JSONDecoder().decode(String.self, from: Data(bytes[start...end]))
+    }
+
+    private static func completeStringEnd(at start: Int, in bytes: [UInt8]) -> Int? {
+        var position = start + 1
+        var escaped = false
+        while position < bytes.count {
+            let byte = bytes[position]
+            if escaped { escaped = false }
+            else if byte == 92 { escaped = true }
+            else if byte == 34 { return position }
+            position += 1
+        }
+        return nil
+    }
+
+    private static func completeObjectEnd(at start: Int, in bytes: [UInt8]) -> Int? {
+        var position = start
+        var depth = 0
+        while position < bytes.count {
+            switch bytes[position] {
+            case 34:
+                guard let end = completeStringEnd(at: position, in: bytes) else { return nil }
+                position = end + 1
+                continue
+            case 123: depth += 1
+            case 125:
+                depth -= 1
+                if depth == 0 { return position }
+            default: break
+            }
+            position += 1
+        }
+        return nil
+    }
+
+    private static func isWhitespace(_ byte: UInt8) -> Bool {
+        byte == 32 || byte == 9 || byte == 10 || byte == 13
     }
 }

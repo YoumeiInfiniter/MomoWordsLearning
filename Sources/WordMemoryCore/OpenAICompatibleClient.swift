@@ -80,6 +80,89 @@ public enum ModelSecretStore {
 public struct OpenAICompatibleClient: Sendable {
     public init() {}
 
+    /// One model request streams the first usable clue, then validates the complete card.
+    public func generateStreaming(
+        _ request: MemoryRequest,
+        configuration: ModelConfiguration,
+        onQuickHint: @Sendable (QuickMemoryHint) async -> Void
+    ) async throws -> MemoryCard {
+        try configuration.validate()
+        let body: [String: Any] = [
+            "model": configuration.model,
+            "temperature": 0.35,
+            "stream": true,
+            "messages": [
+                ["role": "system", "content": MemoryHarness.systemInstructions],
+                ["role": "user", "content": MemoryHarness.userPrompt(request)]
+            ]
+        ]
+        var urlRequest = URLRequest(url: configuration.endpoint)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        urlRequest.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+        urlRequest.timeoutInterval = 90
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            bytes.task.cancel()
+            throw MemoryHarnessError.requestFailed(status)
+        }
+        defer { bytes.task.cancel() }
+
+        var content = ""
+        var dataLines: [String] = []
+        var plainResponse = ""
+        var didEmitHint = false
+        var reachedDone = false
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            if line.isEmpty {
+                if !dataLines.isEmpty {
+                    let payload = dataLines.joined(separator: "\n")
+                    dataLines.removeAll(keepingCapacity: true)
+                    if payload == "[DONE]" { reachedDone = true; break }
+                    if let delta = try Self.streamContent(from: payload) {
+                        content += delta
+                        if !didEmitHint,
+                           let hint = MemoryHarness.quickHint(from: content, expectedWord: request.word) {
+                            didEmitHint = true
+                            await onQuickHint(hint)
+                        }
+                    }
+                }
+            } else if line.hasPrefix("data:") {
+                dataLines.append(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces))
+            } else if !line.hasPrefix("event:") && !line.hasPrefix(":") {
+                plainResponse += line + "\n"
+            }
+        }
+        if !reachedDone && !dataLines.isEmpty {
+            let payload = dataLines.joined(separator: "\n")
+            if payload != "[DONE]", let delta = try Self.streamContent(from: payload) {
+                content += delta
+            }
+        }
+        try Task.checkCancellation()
+        if content.isEmpty, let data = plainResponse.data(using: .utf8),
+           let completion = try? JSONDecoder().decode(ChatCompletion.self, from: data),
+           let fallbackContent = completion.choices.first?.message.content {
+            content = fallbackContent
+        }
+        guard !content.isEmpty else { throw MemoryHarnessError.invalidResponse("模型未返回流式文本") }
+        return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey)
+    }
+
+    private static func streamContent(from payload: String) throws -> String? {
+        guard let data = payload.data(using: .utf8),
+              let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data) else {
+            throw MemoryHarnessError.invalidResponse("流式响应不是兼容的聊天补全格式")
+        }
+        return chunk.choices.first?.delta.content
+    }
+
     public func generate(_ request: MemoryRequest, configuration: ModelConfiguration) async throws -> MemoryCard {
         try configuration.validate()
         let messages: [[String: String]] = [
@@ -107,6 +190,14 @@ public struct OpenAICompatibleClient: Sendable {
         }
         return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey)
     }
+}
+
+private struct StreamChunk: Decodable {
+    struct Choice: Decodable {
+        struct Delta: Decodable { let content: String? }
+        let delta: Delta
+    }
+    let choices: [Choice]
 }
 
 private struct ChatCompletion: Decodable {

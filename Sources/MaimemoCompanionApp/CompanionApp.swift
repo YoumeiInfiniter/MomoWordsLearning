@@ -12,7 +12,8 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var isMemoryRevealed = false
     @Published private(set) var isShowingLastCapturedWord = false
     @Published private(set) var selectedBranchID: String?
-    @Published private(set) var isGenerating = false
+    @Published private(set) var quickHint: QuickMemoryHint?
+    @Published private(set) var generatingWord: String?
     @Published var memoryError: String?
     @Published var learnerNote = ""
     @Published var selectedMethodKind: MemoryMethodKind? = nil
@@ -30,6 +31,11 @@ final class CompanionViewModel: ObservableObject {
     private var previousWord: String?
     private var lastScanSnapshot: MaimemoAXSnapshot
     private let modelClient = OpenAICompatibleClient()
+    private var quickHints: [String: QuickMemoryHint] = [:]
+    private var generationTask: Task<Void, Never>?
+    private var activeGenerationID: UUID?
+
+    var isGenerating: Bool { generatingWord == snapshot.word && generatingWord != nil }
 
     init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore()) {
         self.reader = reader
@@ -78,6 +84,7 @@ final class CompanionViewModel: ObservableObject {
             memoryError = memoryStore.loadWarning
             if let word = next.word {
                 memoryCard = memoryStore.card(for: word)
+                quickHint = quickHints[word.lowercased()]
                 selectedBranchID = memoryCard?.branches.first?.id
                 showAnswer = false
                 learnerNote = ""
@@ -88,6 +95,7 @@ final class CompanionViewModel: ObservableObject {
             }
         } else if next.word == nil, previousWord != nil {
             memoryCard = nil
+            quickHint = nil
             selectedBranchID = nil
             isMemoryRevealed = false
             selectedMethodKind = nil
@@ -157,6 +165,7 @@ final class CompanionViewModel: ObservableObject {
 
     func generateMemoryCard() {
         guard let word = snapshot.word else { return }
+        if generatingWord == word { return }
         let modelName = modelText
         guard let url = URL(string: endpointText), !modelName.isEmpty else {
             openSettings()
@@ -173,31 +182,71 @@ final class CompanionViewModel: ObservableObject {
             existingCard: memoryCard,
             focusMeaningKey: selectedBranch?.meaningKey
         )
-        isGenerating = true
+        if let oldWord = generatingWord {
+            generationTask?.cancel()
+            quickHints.removeValue(forKey: oldWord.lowercased())
+            activeGenerationID = nil
+        }
+        let generationID = UUID()
+        activeGenerationID = generationID
+        generatingWord = word
+        quickHint = nil
         memoryError = nil
-        Task {
+        generationTask = Task { [weak self] in
+            guard let self else { return }
             do {
                 guard let key = await Task.detached(priority: .userInitiated, operation: {
                     ModelSecretStore.load()
                 }).value else {
-                    openSettings()
-                    settingsMessage = MemoryHarnessError.notConfigured.localizedDescription
-                    isGenerating = false
+                    if activeGenerationID == generationID && snapshot.word == word {
+                        openSettings()
+                        settingsMessage = MemoryHarnessError.notConfigured.localizedDescription
+                    }
+                    finishGeneration(generationID)
                     return
                 }
+                try Task.checkCancellation()
+                guard activeGenerationID == generationID else { return }
                 let configuration = ModelConfiguration(endpoint: url, model: modelName, apiKey: key)
-                let card = try await modelClient.generate(request, configuration: configuration)
+                let card = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
+                    await self?.receiveQuickHint(hint, generationID: generationID)
+                }
+                try Task.checkCancellation()
+                guard activeGenerationID == generationID else { return }
                 try memoryStore.save(card)
+                quickHints.removeValue(forKey: word.lowercased())
                 if snapshot.word == word {
                     memoryCard = card
+                    quickHint = nil
                     selectedBranchID = card.branches.first?.id
                     showAnswer = false
                 }
             } catch {
-                memoryError = error.localizedDescription
+                if activeGenerationID == generationID && !Task.isCancelled {
+                    quickHints.removeValue(forKey: word.lowercased())
+                    if snapshot.word == word {
+                        quickHint = nil
+                        memoryError = error.localizedDescription
+                    }
+                }
             }
-            isGenerating = false
+            finishGeneration(generationID)
         }
+    }
+
+    private func receiveQuickHint(_ hint: QuickMemoryHint, generationID: UUID) {
+        guard activeGenerationID == generationID, !Task.isCancelled else { return }
+        quickHints[hint.word.lowercased()] = hint
+        if snapshot.word?.caseInsensitiveCompare(hint.word) == .orderedSame {
+            quickHint = hint
+        }
+    }
+
+    private func finishGeneration(_ generationID: UUID) {
+        guard activeGenerationID == generationID else { return }
+        activeGenerationID = nil
+        generatingWord = nil
+        generationTask = nil
     }
 
     func selectBranch(_ branch: MeaningBranch) {

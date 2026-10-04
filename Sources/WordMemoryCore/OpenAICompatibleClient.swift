@@ -113,41 +113,33 @@ public struct OpenAICompatibleClient: Sendable {
         defer { bytes.task.cancel() }
 
         var content = ""
-        var dataLines: [String] = []
-        var plainResponse = ""
+        var decoder = ServerSentEventDecoder()
+        var rawResponse = Data()
         var didEmitHint = false
         var reachedDone = false
-        for try await line in bytes.lines {
+        for try await byte in bytes {
             try Task.checkCancellation()
-            if line.isEmpty {
-                if !dataLines.isEmpty {
-                    let payload = dataLines.joined(separator: "\n")
-                    dataLines.removeAll(keepingCapacity: true)
-                    if payload == "[DONE]" { reachedDone = true; break }
-                    if let delta = try Self.streamContent(from: payload) {
-                        content += delta
-                        if !didEmitHint,
-                           let hint = MemoryHarness.quickHint(from: content, expectedWord: request.word) {
-                            didEmitHint = true
-                            await onQuickHint(hint)
-                        }
+            if rawResponse.count < 1_048_576 { rawResponse.append(byte) }
+            if let event = decoder.append(byte) {
+                if event.data == "[DONE]" { reachedDone = true; break }
+                if let delta = try Self.streamContent(from: event.data) {
+                    content += delta
+                    if !didEmitHint,
+                       let hint = MemoryHarness.quickHint(from: content, expectedWord: request.word) {
+                        didEmitHint = true
+                        await onQuickHint(hint)
                     }
                 }
-            } else if line.hasPrefix("data:") {
-                dataLines.append(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces))
-            } else if !line.hasPrefix("event:") && !line.hasPrefix(":") {
-                plainResponse += line + "\n"
             }
         }
-        if !reachedDone && !dataLines.isEmpty {
-            let payload = dataLines.joined(separator: "\n")
-            if payload != "[DONE]", let delta = try Self.streamContent(from: payload) {
+        if !reachedDone, let event = decoder.finish(), event.data != "[DONE]" {
+            if let delta = try Self.streamContent(from: event.data) {
                 content += delta
             }
         }
         try Task.checkCancellation()
-        if content.isEmpty, let data = plainResponse.data(using: .utf8),
-           let completion = try? JSONDecoder().decode(ChatCompletion.self, from: data),
+        if content.isEmpty,
+           let completion = try? JSONDecoder().decode(ChatCompletion.self, from: rawResponse),
            let fallbackContent = completion.choices.first?.message.content {
             content = fallbackContent
         }

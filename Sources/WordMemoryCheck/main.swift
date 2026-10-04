@@ -7,9 +7,37 @@ struct WordMemoryCheck {
     static func main() throws {
         try validateCard()
         try validateStreamingHint()
+        try validateSSEFraming()
         try verifyHistory()
         try preventOverwriteOfUnreadableHistory()
-        print("word-memory-check: 通过流式首条线索、结构校验、义项隔离与记法版本检查")
+        print("word-memory-check: 通过 SSE 分帧、流式首条线索、结构校验、义项隔离与记法版本检查")
+    }
+
+    private static func validateSSEFraming() throws {
+        let chunks = [
+            #"{"choices":[{"delta":{"content":"{"}}]}"#,
+            #"{"choices":[{"delta":{"content":"\"word\":\"state\"}"}}]}"#
+        ]
+        let wire = ": keep-alive\r\n\r\ndata: \(chunks[0])\r\n\r\nevent: message\ndata: \(chunks[1])\n\ndata: [DONE]\r\n\r\n"
+        var decoder = ServerSentEventDecoder()
+        var events: [ServerSentEvent] = []
+        for byte in wire.utf8 {
+            if let event = decoder.append(byte) { events.append(event) }
+        }
+        if let event = decoder.finish() { events.append(event) }
+        guard events.map(\.data) == chunks + ["[DONE]"],
+              events.map(\.name) == [nil, "message", nil] else {
+            throw CheckError.failed("SSE 的 CRLF/LF 空行、保活注释或 DONE 分帧不正确")
+        }
+        var splitDecoder = ServerSentEventDecoder()
+        let multiline = "data: first\r\ndata: second\r\n\r\n"
+        var result: ServerSentEvent?
+        for byte in multiline.utf8 {
+            if let event = splitDecoder.append(byte) { result = event }
+        }
+        guard result?.data == "first\nsecond" else {
+            throw CheckError.failed("同一 SSE 事件的多行 data 未正确合并")
+        }
     }
 
     private static func validateStreamingHint() throws {

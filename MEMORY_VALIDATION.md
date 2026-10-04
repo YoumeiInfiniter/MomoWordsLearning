@@ -60,6 +60,14 @@
 - [x] Debug 编译、`word-memory-check`、Release 构建与本机严格验签通过；`outputs/Maimemo-Companion-0.2.7.zip` 压缩完整性检查通过。
 - [ ] 界面自动化连接 Companion 窗口超时，未完成新版的视觉和实机点击验收；悬停反馈、窗口首次获得焦点时的点击行为及真实模型请求次数仍需现场验证。本轮没有调用真实模型。
 
+## 0.2.8 DeepSeek 流式响应分帧修复（2026-10-05）
+
+- [x] 用户在已配置的 DeepSeek Chat Completions 接口遇到“流式响应不是兼容的聊天补全格式”。本机复现 Swift `AsyncSequence.lines` 会略过 SSE 事件间的空行，使多个 `data:` 块被错误拼接为一段 JSON。
+- [x] 改为按原始字节识别 LF/CRLF、空行、保活注释和 `[DONE]`，保留完整响应非流式兼容路径；没有改动 API Key 存储或请求触发条件。
+- [x] `word-memory-check` 增加逐字节 SSE 分帧测试，覆盖 CRLF/LF、保活、多行 data 与结束标记。
+- [x] 0.2.8 Debug、Release 编译和本机严格签名校验通过；`outputs/Maimemo-Companion-0.2.8.zip` 压缩完整性检查通过。
+- [ ] 未使用用户 API Key 发起真实请求，修复后的 DeepSeek 生成仍需一次用户侧实测确认。
+
 ## 已验证
 
 - `swift build -c debug`：AX 跟词、记忆核心和 SwiftUI 侧栏一起编译。

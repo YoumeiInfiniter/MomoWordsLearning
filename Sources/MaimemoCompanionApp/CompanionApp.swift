@@ -25,6 +25,7 @@ final class CompanionViewModel: ObservableObject {
     @Published var modelText: String
     @Published var enteredAPIKey = ""
     @Published private(set) var hasStoredAPIKey: Bool
+    @Published private(set) var isCheckingStoredAPIKey = true
 
     let reader: MaimemoAccessibilityReader
     let memoryStore: MemoryStore
@@ -62,7 +63,10 @@ final class CompanionViewModel: ObservableObject {
             let exists = await Task.detached(priority: .utility) {
                 ModelSecretStore.exists()
             }.value
-            self?.hasStoredAPIKey = exists
+            guard let self else { return }
+            self.hasStoredAPIKey = exists
+            self.isCheckingStoredAPIKey = false
+            self.generateRevealedCardIfNeeded()
         }
     }
 
@@ -121,8 +125,20 @@ final class CompanionViewModel: ObservableObject {
     }
 
     func revealMemoryHelp() {
-        guard snapshot.word != nil else { return }
+        guard snapshot.word != nil, !isMemoryRevealed else { return }
         isMemoryRevealed = true
+        generateRevealedCardIfNeeded()
+    }
+
+    func returnToLearning() {
+        showSettings = false
+        generateRevealedCardIfNeeded()
+    }
+
+    private func generateRevealedCardIfNeeded() {
+        guard snapshot.word != nil, isMemoryRevealed, !showSettings,
+              memoryCard == nil, quickHint == nil, !isGenerating, modelIsConfigured else { return }
+        generateMemoryCard()
     }
 
     func saveModelSettings() {
@@ -303,6 +319,7 @@ final class CompanionViewModel: ObservableObject {
 
 struct SidebarView: View {
     @ObservedObject var model: CompanionViewModel
+    @State private var isRevealHovered = false
 
     private let background = Color(red: 0.055, green: 0.075, blue: 0.105)
     private let muted = Color.white.opacity(0.58)
@@ -317,24 +334,51 @@ struct SidebarView: View {
             )
             .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    if model.showSettings {
-                        settingsPage
-                    } else {
-                        header
-                        if !model.snapshot.appFound || !model.snapshot.isTrusted || model.isShowingLastCapturedWord {
-                            connectionCard
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if model.showSettings {
+                            settingsPage
+                        } else {
+                            header
+                            if !model.snapshot.appFound || !model.snapshot.isTrusted || model.isShowingLastCapturedWord {
+                                connectionCard
+                            }
+                            if model.isMemoryRevealed {
+                                wordCard
+                                MemoryPanelView(model: model)
+                            } else {
+                                revealSurface(minHeight: geometry.size.height - 140)
+                            }
                         }
-                        wordCard
-                        MemoryPanelView(model: model)
                     }
+                    .padding(26)
+                    .frame(minHeight: geometry.size.height, alignment: .top)
                 }
-                .padding(26)
             }
         }
         .frame(minWidth: 320, idealWidth: 410, maxWidth: 580, minHeight: 300)
         .preferredColorScheme(.dark)
+    }
+
+    private func revealSurface(minHeight: CGFloat) -> some View {
+        Button {
+            model.revealMemoryHelp()
+        } label: {
+            VStack(alignment: .leading, spacing: 24) {
+                wordCard
+                MemoryPanelView(model: model)
+            }
+            .frame(maxWidth: .infinity, minHeight: max(0, minHeight), alignment: .topLeading)
+            .contentShape(Rectangle())
+            .background(isRevealHovered ? .white.opacity(0.025) : .clear, in: RoundedRectangle(cornerRadius: 24))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.snapshot.word == nil)
+        .accessibilityLabel("查看\(model.snapshot.word ?? "当前单词")的线索")
+        .accessibilityHint("已有线索立即显示；没有线索时调用已配置的模型")
+        .onHover { isRevealHovered = $0 }
+        .animation(.easeOut(duration: 0.16), value: isRevealHovered)
     }
 
     private var header: some View {
@@ -397,7 +441,7 @@ struct SidebarView: View {
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack {
-                Button { model.showSettings = false } label: {
+                Button { model.returnToLearning() } label: {
                     Label("返回学习", systemImage: "chevron.left")
                         .font(.custom("Songti SC", size: 14))
                 }
@@ -409,7 +453,7 @@ struct SidebarView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("记忆模型")
                     .font(.custom("Songti SC", size: 21))
-                Text("仅在你主动生成记忆卡时调用。当前词与填写的卡点会发送给所配置的接口。")
+                Text("点击学习区域且当前词没有本地线索时，或主动重做记法时调用。当前词与填写的卡点会发送给所配置的接口。")
                     .font(.custom("Songti SC", size: 13))
                     .foregroundStyle(muted)
                 TextField("完整接口地址 · https://…/v1/chat/completions", text: $model.endpointText)

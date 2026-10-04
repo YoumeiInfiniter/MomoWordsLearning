@@ -52,29 +52,37 @@ struct MemoryPanelView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(model.snapshot.word == nil ? "等待墨墨显示当前词" : "先自己想一想")
                     .font(.custom("Songti SC", size: 18))
-                Text("需要时再打开提示")
+                Text(model.snapshot.word == nil ? "捕获到单词后即可查看线索" : "轻触学习区域，查看一条线索")
                     .font(.custom("Songti SC", size: 12))
                     .foregroundStyle(.white.opacity(0.62))
             }
             Spacer(minLength: 8)
-            Button("给我线索") {
-                model.revealMemoryHelp()
+            if model.snapshot.word != nil {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .frame(width: 34, height: 34)
+                    .background(.white.opacity(0.07), in: Circle())
+                    .accessibilityHidden(true)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.snapshot.word == nil)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("还没有这个词的线索")
+            Text(model.isCheckingStoredAPIKey ? "正在确认模型设置…" :
+                 model.modelIsConfigured ? "线索暂时没有准备好" : "先接入记忆模型")
                 .font(.custom("Songti SC", size: 17))
-            Button(model.modelIsConfigured ? "生成一条线索" : "配置模型") {
-                if model.modelIsConfigured { model.generateMemoryCard() }
-                else { model.openSettings() }
+            if model.isCheckingStoredAPIKey {
+                ProgressView().controlSize(.small)
+            } else {
+                Button(model.modelIsConfigured ? "重试生成" : "配置模型") {
+                    if model.modelIsConfigured { model.generateMemoryCard() }
+                    else { model.openSettings() }
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
         }
     }
 
@@ -361,7 +369,7 @@ struct MemoryPanelView: View {
                 .font(.caption)
             }
             if !model.modelIsConfigured {
-                Text("模型尚未配置。当前词会继续实时更新；配置后由你主动点击生成。")
+                Text("模型尚未配置。当前词会继续实时更新；配置后点击学习区域即可生成。")
                     .font(.caption2)
                     .foregroundStyle(.white.opacity(0.64))
             }

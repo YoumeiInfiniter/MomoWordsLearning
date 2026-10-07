@@ -2,10 +2,11 @@ import AppKit
 import Foundation
 import WordMemoryCore
 
+/// Offline checks; model HTTP calls use a local URLProtocol fixture.
 @main
 @MainActor
 struct WordMemoryCheck {
-    static func main() throws {
+    static func main() async throws {
         try validateCard()
         try validateLegacyCardDecoding()
         try validateManualAnchorSelection()
@@ -15,7 +16,8 @@ struct WordMemoryCheck {
         try preventOverwriteOfUnreadableHistory()
         try verifyImageStorage()
         try verifyMaiziImageResponse()
-        print("word-memory-check: 通过 SSE 分帧、手动联想选择、旧卡兼容、图片响应、图片存储与历史检查")
+        try await JSONContractChecks.run(card: sampleCard())
+        print("word-memory-check: 通过 JSON 契约、格式恢复、截断识别、单次请求、SSE、旧卡兼容与本地存储检查")
     }
 
     private static func validateSSEFraming() throws {

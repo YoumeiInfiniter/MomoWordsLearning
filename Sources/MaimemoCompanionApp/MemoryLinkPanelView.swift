@@ -18,7 +18,7 @@ struct MemoryLinkPanelView: View {
                 anchorContent(hint.anchor, word: hint.word, imageURL: nil)
                 coreMeaning(hint.coreConcept)
                 if let branch = hint.branch { contextLine(branch) }
-                progressLine
+                if model.isGenerating { progressLine }
             } else if model.isGenerating {
                 anchorPicker
                 progressLine
@@ -31,6 +31,13 @@ struct MemoryLinkPanelView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                if model.quickHint != nil, !model.isGenerating {
+                    Text("已保留可用的首条线索；完整卡片尚未保存")
+                        .font(.custom("Songti SC", size: 11))
+                        .foregroundStyle(.white.opacity(0.58))
+                    Button("重新生成完整线索") { model.retrySelectedAnchor() }
+                        .buttonStyle(.bordered)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

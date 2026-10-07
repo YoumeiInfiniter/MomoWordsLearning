@@ -48,10 +48,8 @@ public enum MemoryHarness {
     4. 其他记忆方法只作为内部候选，不在主界面罗列；谐音、拆字或画面联想不能冒充语言事实。
     5. 给一个自编、简短、纯英文的新句用于内部迁移检查。answer 和 clue 单独提供。句子不能只是前面情境句换几个无关词。
     6. 只把用户明确提供的感受和困难当成用户事实；没有反馈时所有方法都只是待试用建议。不确定的词源或罕见义项宁可不写。
-    输出字段按下面示例的顺序，不要在 JSON 前后添加说明；先输出 anchor，好让用户尽早看到词与意思的联系。
-    返回一个 JSON object，字段精确为：
-    {"word":"英文词","coreConcept":"中文核心关系","anchor":{"kind":"sound|letterIllustration","cue":"一句能记住的中文联想或画面标题","explanation":"这个声音／字母画面怎样指向核心关系","imagePrompt":null},"branches":[{"partOfSpeech":"词性","meaningKey":"简短稳定英文义项键","chineseMeaning":"当句中文意思","context":"自编英文短句","signal":"句中可观察信号","explanation":"核心关系如何在这里变义"}],"coreImage":"一句简短画面","methods":[{"id":"m1","kind":"context|image|contrast|morphology|sound|personal","title":"短标题","cue":"具体记忆钩子","whyItHelps":"为什么有助于回忆","isLanguageFact":false}],"transferCheck":{"sentence":"自编英文新句","targetBranch":"与某个 meaningKey 完全一致","answer":"当句意思","clue":"句中判断线索"},"caveat":null}
-    当 anchor.kind 是 letterIllustration，imagePrompt 必须改为非空英文提示词，并写出当前英文词的准确拼写；sound 时 imagePrompt 必须是 null。
+    输出格式严格遵循本次请求提供的 JSON 输出契约和示例。所有内容写入指定字段，不能在 JSON 前后添加说明。
+    当 anchor.kind 是 letterIllustration，imagePrompt 必须为非空英文提示词，并写出当前英文词的准确拼写；sound 时 imagePrompt 必须是 JSON null，不能写成字符串 "null"。
     """
 
     public static func userPrompt(_ request: MemoryRequest) -> String {
@@ -75,22 +73,33 @@ public enum MemoryHarness {
     }
 
     public static func parse(_ raw: String, expectedWord: String, requiredMeaningKey: String? = nil, requiredAnchorKind: MemoryAnchorKind? = nil) throws -> MemoryCard {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let json: String
-        if trimmed.hasPrefix("```") {
-            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
-            json = lines.dropFirst().dropLast().joined(separator: "\n")
-        } else {
-            json = trimmed
-        }
-        guard let data = json.data(using: .utf8),
-              let card = try? JSONDecoder().decode(MemoryCard.self, from: data) else {
-            throw MemoryHarnessError.invalidResponse("无法解析 JSON")
+        let data = try MemoryResponseContract.normalizedData(from: raw)
+        let card: MemoryCard
+        do {
+            card = try JSONDecoder().decode(MemoryCard.self, from: data)
+        } catch let error as DecodingError {
+            func path(_ keys: [any CodingKey]) -> String {
+                keys.map { $0.intValue.map { "[\($0)]" } ?? $0.stringValue }.joined(separator: ".")
+            }
+            let reason: String
+            switch error {
+            case .keyNotFound(let key, let context):
+                reason = "缺少必填字段 \(path(context.codingPath + [key]))"
+            case .typeMismatch(_, let context):
+                reason = "字段类型不符合约定：\(path(context.codingPath))"
+            case .valueNotFound(_, let context):
+                reason = "必填字段不能为 null：\(path(context.codingPath))"
+            case .dataCorrupted(let context):
+                reason = context.codingPath.isEmpty ? "JSON 语法无效" : "字段值不符合约定：\(path(context.codingPath))"
+            @unknown default: reason = "JSON 结构不符合约定"
+            }
+            throw MemoryHarnessError.invalidResponse(reason)
         }
         guard card.word.caseInsensitiveCompare(expectedWord) == .orderedSame else {
             throw MemoryHarnessError.invalidResponse("单词与当前词不匹配")
         }
-        guard !card.coreConcept.isEmpty, !card.branches.isEmpty, !card.methods.isEmpty else {
+        func hasText(_ text: String) -> Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard hasText(card.coreConcept), hasText(card.coreImage), !card.branches.isEmpty, !card.methods.isEmpty else {
             throw MemoryHarnessError.invalidResponse("核心关系、语境或记法缺失")
         }
         guard let anchor = card.anchor,
@@ -117,6 +126,9 @@ public enum MemoryHarness {
             }
         }
         let keys = Set(card.branches.map(\.meaningKey))
+        guard card.branches.allSatisfy({ branch in
+            [branch.partOfSpeech, branch.meaningKey, branch.chineseMeaning, branch.context, branch.signal, branch.explanation].allSatisfy(hasText)
+        }) else { throw MemoryHarnessError.invalidResponse("语境分支包含空字段") }
         guard keys.count == card.branches.count else {
             throw MemoryHarnessError.invalidResponse("义项键重复")
         }
@@ -124,11 +136,13 @@ public enum MemoryHarness {
             throw MemoryHarnessError.invalidResponse("本次重点义项键未保留")
         }
         guard keys.contains(card.transferCheck.targetBranch),
-              !card.transferCheck.sentence.isEmpty,
-              !card.transferCheck.answer.isEmpty else {
+              hasText(card.transferCheck.sentence), hasText(card.transferCheck.answer), hasText(card.transferCheck.clue) else {
             throw MemoryHarnessError.invalidResponse("新句与义项无法对应")
         }
         let ids = card.methods.map(\.id)
+        guard card.methods.allSatisfy({ method in
+            [method.id, method.title, method.cue, method.whyItHelps].allSatisfy(hasText)
+        }) else { throw MemoryHarnessError.invalidResponse("记法包含空字段") }
         guard Set(ids).count == ids.count else {
             throw MemoryHarnessError.invalidResponse("记法 ID 重复")
         }
@@ -157,6 +171,8 @@ public enum MemoryHarness {
         if anchor.kind == .letterIllustration {
             guard let prompt = anchor.imagePrompt,
                   promptContainsWord(prompt, word: word) else { return nil }
+        } else if anchor.imagePrompt != nil {
+            return nil
         }
 
         var branch: MeaningBranch?

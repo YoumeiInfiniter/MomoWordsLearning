@@ -218,6 +218,12 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
+    func retrySelectedAnchor() {
+        guard isMemoryRevealed, let word = snapshot.word else { return }
+        imageSelectionIntent = selectedAnchorKind == .letterIllustration ? word : nil
+        generateMemoryCard(requestedAnchorKind: selectedAnchorKind, switchingAnchor: memoryCard != nil)
+    }
+
     func saveModelSettings() {
         guard !isSavingModelSettings else { return }
         let endpoint = endpointText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -354,9 +360,7 @@ final class CompanionViewModel: ObservableObject {
                 }
             } catch {
                 if activeGenerationID == generationID && !Task.isCancelled {
-                    quickHints.removeValue(forKey: word.lowercased())
                     if snapshot.word == word {
-                        quickHint = nil
                         memoryError = error.localizedDescription
                     }
                 }

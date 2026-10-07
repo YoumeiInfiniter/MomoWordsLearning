@@ -91,6 +91,11 @@ enum JSONContractChecks {
         FixtureProtocol.configure(body: try envelope(json), status: 200)
         try require(try await client.generate(request, configuration: configuration) == card, "HTTP 模拟响应未还原记忆卡")
         try require(FixtureProtocol.requestCount == 1, "生成发起了多次请求")
+        for reason in ["", "太牵强"] {
+            FixtureProtocol.configure(body: try envelope(json), status: 200)
+            let revised = try await client.generate(MemoryRequest.revisingSound(card, reason: reason), configuration: configuration)
+            try require(revised == card && FixtureProtocol.requestCount == 1, "可选原因导致重做被阻止或发起多次请求")
+        }
         let streamedPayload = try JSONSerialization.data(withJSONObject: ["choices": [["index": 0, "delta": ["content": json], "finish_reason": "stop"]]])
         let wire = Data("data: \(String(decoding: streamedPayload, as: UTF8.self))\n\ndata: [DONE]\n\n".utf8)
         let hints = HintRecorder()

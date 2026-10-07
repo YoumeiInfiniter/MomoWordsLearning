@@ -13,11 +13,12 @@ struct WordMemoryCheck {
         try validateStreamingHint()
         try validateSSEFraming()
         try verifyHistory()
+        try verifySoundRevisions()
         try preventOverwriteOfUnreadableHistory()
         try verifyImageStorage()
         try verifyMaiziImageResponse()
         try await JSONContractChecks.run(card: sampleCard())
-        print("word-memory-check: 通过思考开关、JSON 契约、格式恢复、截断识别、单次请求、SSE、旧卡兼容与本地存储检查")
+        print("word-memory-check: 通过联想重做、可选原因、旧卡归档、失败保护、思考开关、JSON、单次请求与存储检查")
     }
 
     private static func validateSSEFraming() throws {
@@ -189,6 +190,66 @@ struct WordMemoryCheck {
               verbHistory?.methodVersions.map(\.version) == [1, 2],
               verbHistory?.methodVersions.last?.reasonForChange == "旧方法无效" else {
             throw CheckError.failed("义项历史或记法版本未正确保存")
+        }
+    }
+
+    private static func verifySoundRevisions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MaimemoRevisionCheck-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("memory.json")
+        let image = MemoryAnchor(kind: .letterIllustration, cue: "旧插画", explanation: "不应因谐音重做而丢失",
+                                 imagePrompt: "Draw STATE as a scene")
+        let original = sampleCard().withAlternateAnchor(image)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // A pre-0.3.4 file has no revisions key at all.
+        let oldFile = try JSONSerialization.data(withJSONObject: [
+            "cards": ["state": JSONSerialization.jsonObject(with: JSONEncoder().encode(original))], "branches": [:]
+        ])
+        try oldFile.write(to: file)
+        let store = MemoryStore(fileURL: file)
+        guard store.loadWarning == nil, store.card(for: "state") == original, store.revisions(for: "state").isEmpty else {
+            throw CheckError.failed("重做功能破坏了旧 memory.json 兼容")
+        }
+        for note in [nil, "  ", "谐音太牵强，没连到动词意思"] as [String?] {
+            let request = MemoryRequest.revisingSound(original, reason: note)
+            let prompt = MemoryHarness.userPrompt(request)
+            guard request.preferredAnchorKind == .sound, request.isAnchorRevision,
+                  request.focusMeaningKey == original.branches.first?.meaningKey,
+                  prompt.contains(original.anchor!.cue), prompt.contains(original.anchor!.explanation),
+                  prompt.contains("重新生成主联想"), prompt.contains("不要仅换标点") else {
+                throw CheckError.failed("重做请求没有带上旧联想、指令或义项键")
+            }
+            guard note?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+                    ? prompt.contains("不推断具体原因") : prompt.contains(note!) else {
+                throw CheckError.failed("可选原因未正确进入提示词")
+            }
+        }
+        let first = original.replacingAnchor(MemoryAnchor(kind: .sound, cue: "新的声音钩子", explanation: "明确连接核心意思"))
+        try store.save(first, replacing: original, reason: "  太牵强  ")
+        let second = first.replacingAnchor(MemoryAnchor(kind: .sound, cue: "另一个声音钩子", explanation: "换成更贴近自己的场景"))
+        try store.save(second, replacing: first, reason: "  ")
+        let reloaded = MemoryStore(fileURL: file)
+        guard reloaded.card(for: "state") == second, second.alternateAnchor == image,
+              reloaded.revisions(for: "STATE").map(\.previousCard) == [original, first],
+              reloaded.revisions(for: "state").map(\.reason) == ["太牵强", nil] else {
+            throw CheckError.failed("反复重做未保留旧卡、原因或已准备插画")
+        }
+        do {
+            try store.save(first, replacing: original)
+            throw CheckError.failed("旧请求覆盖了更晚的联想")
+        } catch MemoryStore.StoreError.staleRevision { }
+        guard store.card(for: "state") == second, store.revisions(for: "state").count == 2 else {
+            throw CheckError.failed("失败请求改变了已有缓存")
+        }
+        // Force an atomic-write failure; the in-memory card/history must also stay unchanged.
+        try FileManager.default.moveItem(at: file, to: directory.appendingPathComponent("saved.json"))
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: true)
+        do {
+            try store.save(first, replacing: second, reason: "保存失败测试")
+            throw CheckError.failed("无法写入的位置却保存成功")
+        } catch is CocoaError { }
+        guard store.card(for: "state") == second, store.revisions(for: "state").count == 2 else {
+            throw CheckError.failed("写入失败后旧联想未保留")
         }
     }
 

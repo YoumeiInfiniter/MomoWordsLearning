@@ -26,6 +26,10 @@ struct MemoryLinkPanelView: View {
                 anchorPicker
                 emptyState
             }
+            if model.isMemoryRevealed, model.selectedAnchorKind == .sound,
+               model.memoryCard?.anchor(for: .sound) != nil {
+                soundRevisionControls
+            }
             if model.isMemoryRevealed, let error = model.memoryError {
                 Label(error, systemImage: "exclamationmark.circle")
                     .font(.caption)
@@ -67,6 +71,34 @@ struct MemoryLinkPanelView: View {
             Text("选择插画会直接生图，可能计费；已有图片会复用")
                 .font(.custom("Songti SC", size: 11))
                 .foregroundStyle(.white.opacity(0.52))
+        }
+    }
+
+    private var soundRevisionControls: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            TextField("哪里不合适？可不填，例如：太牵强、没连到意思", text: $model.learnerNote)
+                .font(.custom("Songti SC", size: 12))
+                .textFieldStyle(.plain)
+                .padding(10)
+                .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.12)))
+                .accessibilityLabel("不满意的原因（可不填）")
+                .disabled(model.isGenerating)
+            HStack(spacing: 9) {
+                Button { model.regenerateSoundAnchor() } label: {
+                    Label(model.isGenerating ? "正在换联想…" : "换个联想", systemImage: "arrow.clockwise")
+                        .font(.custom("Songti SC", size: 13))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isGenerating)
+                if model.isGenerating { ProgressView().controlSize(.small) }
+                Text("调用模型，可能计费")
+                    .font(.custom("Songti SC", size: 11))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
         }
     }
 

@@ -155,6 +155,7 @@ final class CompanionViewModel: ObservableObject {
             selectedBranchID = nil
             isMemoryRevealed = false
             selectedMethodKind = nil
+            learnerNote = ""
         }
         previousWord = next.word
         if next.word != snapshot.word || next.appFound != snapshot.appFound || next.isTrusted != snapshot.isTrusted {
@@ -200,6 +201,7 @@ final class CompanionViewModel: ObservableObject {
 
     func chooseAnchor(_ kind: MemoryAnchorKind) {
         guard isMemoryRevealed, let word = snapshot.word else { return }
+        if selectedAnchorKind != kind { learnerNote = "" }
         selectedAnchorKind = kind
         imageError = nil
         imageSelectionIntent = kind == .letterIllustration ? word : nil
@@ -234,6 +236,13 @@ final class CompanionViewModel: ObservableObject {
         guard isMemoryRevealed, let word = snapshot.word else { return }
         imageSelectionIntent = selectedAnchorKind == .letterIllustration ? word : nil
         generateMemoryCard(requestedAnchorKind: selectedAnchorKind, switchingAnchor: memoryCard != nil)
+    }
+
+    func regenerateSoundAnchor() {
+        guard isMemoryRevealed, selectedAnchorKind == .sound, !isGenerating,
+              memoryCard?.anchor(for: .sound) != nil else { return }
+        imageSelectionIntent = nil
+        generateMemoryCard(requestedAnchorKind: .sound, isAnchorRevision: true)
     }
 
     func saveModelSettings() {
@@ -298,7 +307,7 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
-    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false) {
+    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false, isAnchorRevision: Bool = false) {
         guard let word = snapshot.word else { return }
         let anchorKind = requestedAnchorKind ?? selectedAnchorKind
         if generatingWord == word && generatingAnchorKind == anchorKind { return }
@@ -311,7 +320,7 @@ final class CompanionViewModel: ObservableObject {
             return
         }
         let previous = branchHistory
-        let request = MemoryRequest(
+        let baseRequest = MemoryRequest(
             word: word,
             learnerNote: learnerNote,
             previousReason: previous?.forgetReason,
@@ -321,7 +330,10 @@ final class CompanionViewModel: ObservableObject {
             focusMeaningKey: switchingAnchor ? nil : selectedBranch?.meaningKey,
             preferredAnchorKind: anchorKind
         )
-        let existingCard = switchingAnchor ? memoryCard : nil
+        let request = if isAnchorRevision, let card = memoryCard {
+            MemoryRequest.revisingSound(card, reason: learnerNote)
+        } else { baseRequest }
+        let existingCard = switchingAnchor || isAnchorRevision ? memoryCard : nil
         if let oldWord = generatingWord {
             generationTask?.cancel()
             quickHints.removeValue(forKey: oldWord.lowercased())
@@ -360,7 +372,8 @@ final class CompanionViewModel: ObservableObject {
                 } else {
                     generated
                 }
-                try memoryStore.save(card)
+                try memoryStore.save(card, replacing: isAnchorRevision ? existingCard : nil,
+                                     reason: isAnchorRevision ? request.learnerNote : nil)
                 quickHints.removeValue(forKey: word.lowercased())
                 if snapshot.word == word && selectedAnchorKind == anchorKind {
                     memoryCard = card
@@ -368,6 +381,7 @@ final class CompanionViewModel: ObservableObject {
                     quickHint = nil
                     selectedBranchID = card.branches.first?.id
                     showAnswer = false
+                    if isAnchorRevision { learnerNote = "" }
                     if anchorKind == .letterIllustration && imageSelectionIntent == word {
                         imageSelectionIntent = nil
                         generateImageIfNeeded(for: card)
@@ -375,7 +389,11 @@ final class CompanionViewModel: ObservableObject {
                 }
             } catch {
                 if activeGenerationID == generationID && !Task.isCancelled {
+                    if isAnchorRevision {
+                        quickHints.removeValue(forKey: word.lowercased())
+                    }
                     if snapshot.word == word {
+                        if isAnchorRevision { quickHint = nil }
                         memoryError = error.localizedDescription
                     }
                 }

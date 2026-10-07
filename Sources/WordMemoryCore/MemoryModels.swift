@@ -152,6 +152,20 @@ public struct MemoryCard: Codable, Hashable, Sendable {
     }
 }
 
+/// Archives the complete prior card and the optional reason when a user replaces an anchor.
+public struct MemoryCardRevision: Codable, Sendable {
+    public let previousCard: MemoryCard
+    public let reason: String?
+    public let createdAt: Date
+
+    public init(previousCard: MemoryCard, reason: String?, createdAt: Date = Date()) {
+        self.previousCard = previousCard
+        let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.reason = trimmed.isEmpty ? nil : trimmed
+        self.createdAt = createdAt
+    }
+}
+
 /// A provisional first clue. It is never persisted; only a fully validated card is saved.
 public struct QuickMemoryHint: Equatable, Sendable {
     public let word: String

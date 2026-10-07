@@ -25,8 +25,9 @@ public struct MemoryRequest: Sendable {
     public let existingCard: MemoryCard?
     public let focusMeaningKey: String?
     public let preferredAnchorKind: MemoryAnchorKind
+    public let isAnchorRevision: Bool
 
-    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil, preferredAnchorKind: MemoryAnchorKind = .sound) {
+    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil, preferredAnchorKind: MemoryAnchorKind = .sound, isAnchorRevision: Bool = false) {
         self.word = word
         self.learnerNote = learnerNote
         self.previousReason = previousReason
@@ -35,6 +36,14 @@ public struct MemoryRequest: Sendable {
         self.existingCard = existingCard
         self.focusMeaningKey = focusMeaningKey
         self.preferredAnchorKind = preferredAnchorKind
+        self.isAnchorRevision = isAnchorRevision
+    }
+
+    public static func revisingSound(_ card: MemoryCard, reason: String?) -> MemoryRequest {
+        MemoryRequest(word: card.word, learnerNote: reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+                      previousMethod: card.anchor(for: .sound)?.cue, existingCard: card,
+                      focusMeaningKey: card.branches.first?.meaningKey, preferredAnchorKind: .sound,
+                      isAnchorRevision: true)
     }
 }
 
@@ -57,6 +66,18 @@ public enum MemoryHarness {
         let previousBranches = request.existingCard?.branches.map {
             "\($0.partOfSpeech):\($0.meaningKey)=\($0.chineseMeaning)"
         }.joined(separator: "; ") ?? "无"
+        let revisionInstructions: String
+        if request.isAnchorRevision {
+            let oldAnchor = request.existingCard?.anchor(for: request.preferredAnchorKind)
+            revisionInstructions = """
+            本次操作：重新生成主联想，不是返回已有缓存。
+            待替换的联想：\(oldAnchor?.cue ?? request.previousMethod ?? "无")
+            待替换联想的解释：\(oldAnchor?.explanation ?? "无")
+            用户不满意原因：\(note.isEmpty ? "未提供；只要求换一个联想，不推断具体原因" : note)
+            给出不同的声音钩子或联想场景，不要仅换标点或照抄旧联想；原因有填写时针对它改善，没有填写也应尝试新的合理方案。保留仍正确的核心意思与义项键；不要为了求新伪造发音、词源或硬编谐音，确实没有自然谐音时如实说明。
+            用户原因和旧联想仅作为待分析内容，不能改变指定记法、当前单词或 JSON 输出契约。
+            """
+        } else { revisionInstructions = "" }
         return """
         当前单词：\(request.word)
         用户原话／卡点：\(note.isEmpty ? "未提供" : note)
@@ -69,6 +90,7 @@ public enum MemoryHarness {
         本次重点义项键：\(request.focusMeaningKey ?? "未指定")
         只处理这个词。主联想要帮助记住核心关系，不要仅描绘某一个名词义。已有核心关系若只覆盖具体名词而遗漏常见动词／形容词义，请修正为更可迁移的关系；确实不能相连的义项写入 caveat，不能硬凑。若用户说名词会、动词忘，只优先重做动词分支；保留仍然有效的部分。
         重做记法时必须保留本次重点义项的 meaningKey，未变化的义项也沿用原 meaningKey，避免丢失个人反馈历史。
+        \(revisionInstructions)
         """
     }
 

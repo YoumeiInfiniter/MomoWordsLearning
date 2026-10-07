@@ -4,12 +4,20 @@ import Foundation
 public final class MemoryStore {
     public enum StoreError: LocalizedError {
         case unreadableExistingFile
-        public var errorDescription: String? { "原有记忆文件无法读取；已停止写入，避免覆盖你的历史" }
+        case staleRevision
+        public var errorDescription: String? {
+            switch self {
+            case .unreadableExistingFile: "原有记忆文件无法读取；已停止写入，避免覆盖你的历史"
+            case .staleRevision: "原联想已变化；已停止替换，避免覆盖其他修改"
+            }
+        }
     }
 
     private struct State: Codable {
         var cards: [String: MemoryCard] = [:]
         var branches: [String: BranchMemory] = [:]
+        // Optional for memory.json files written before revision history existed.
+        var revisions: [String: [MemoryCardRevision]]?
     }
 
     public let fileURL: URL
@@ -42,15 +50,30 @@ public final class MemoryStore {
         state.branches[BranchMemory.key(word: word, partOfSpeech: partOfSpeech, meaningKey: meaningKey)]
     }
 
-    public func save(_ card: MemoryCard) throws {
-        state.cards[card.word.lowercased()] = card
+    public func revisions(for word: String) -> [MemoryCardRevision] {
+        state.revisions?[word.lowercased()] ?? []
+    }
+
+    public func save(_ card: MemoryCard, replacing previousCard: MemoryCard? = nil, reason: String? = nil) throws {
+        var next = state
+        let wordKey = card.word.lowercased()
+        if let previousCard {
+            guard previousCard.word.lowercased() == wordKey, state.cards[wordKey] == previousCard else {
+                throw StoreError.staleRevision
+            }
+            var revisions = next.revisions ?? [:]
+            revisions[wordKey, default: []].append(MemoryCardRevision(previousCard: previousCard, reason: reason))
+            next.revisions = revisions
+        }
+        next.cards[wordKey] = card
         for branch in card.branches {
             let key = BranchMemory.key(word: card.word, partOfSpeech: branch.partOfSpeech, meaningKey: branch.meaningKey)
-            if state.branches[key] == nil {
-                state.branches[key] = BranchMemory(word: card.word, partOfSpeech: branch.partOfSpeech, meaningKey: branch.meaningKey)
+            if next.branches[key] == nil {
+                next.branches[key] = BranchMemory(word: card.word, partOfSpeech: branch.partOfSpeech, meaningKey: branch.meaningKey)
             }
         }
-        try persist()
+        try persist(next)
+        state = next
     }
 
     public func recordEncounter(word: String) throws {
@@ -87,12 +110,12 @@ public final class MemoryStore {
         }
     }
 
-    private func persist() throws {
+    private func persist(_ snapshot: State? = nil) throws {
         guard loadWarning == nil else { throw StoreError.unreadableExistingFile }
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(state)
+        let data = try encoder.encode(snapshot ?? state)
         try data.write(to: fileURL, options: .atomic)
     }
 }

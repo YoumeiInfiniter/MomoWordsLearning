@@ -5,11 +5,18 @@ public struct ModelConfiguration: Sendable {
     public let endpoint: URL
     public let model: String
     public let apiKey: String
+    public let thinkingEnabled: Bool
 
-    public init(endpoint: URL, model: String, apiKey: String) {
+    public init(endpoint: URL, model: String, apiKey: String, thinkingEnabled: Bool = true) {
         self.endpoint = endpoint
         self.model = model
         self.apiKey = apiKey
+        self.thinkingEnabled = thinkingEnabled
+    }
+
+    /// Other OpenAI-compatible providers may reject DeepSeek-specific fields.
+    public static func supportsThinkingToggle(at endpoint: URL) -> Bool {
+        endpoint.host?.lowercased() == "api.deepseek.com"
     }
 
     public func validate() throws {
@@ -83,7 +90,7 @@ public struct OpenAICompatibleClient: Sendable {
 
     public static func makeRequest(_ request: MemoryRequest, configuration: ModelConfiguration, streaming: Bool) throws -> URLRequest {
         try configuration.validate()
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": configuration.model,
             "temperature": 0.35,
             "stream": streaming,
@@ -94,6 +101,9 @@ public struct OpenAICompatibleClient: Sendable {
                 ["role": "user", "content": MemoryHarness.userPrompt(request) + "\n\n" + MemoryResponseContract.instructions(for: request)]
             ]
         ]
+        if ModelConfiguration.supportsThinkingToggle(at: configuration.endpoint) {
+            body["thinking"] = ["type": configuration.thinkingEnabled ? "enabled" : "disabled"]
+        }
         var result = URLRequest(url: configuration.endpoint)
         result.httpMethod = "POST"
         result.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -27,6 +27,12 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var isSavingModelSettings = false
     @Published var endpointText: String
     @Published var modelText: String
+    @Published var thinkingEnabled: Bool {
+        didSet {
+            // Saving this preference never starts or restarts a model request.
+            UserDefaults.standard.set(thinkingEnabled, forKey: "memory.model.thinkingEnabled")
+        }
+    }
     @Published var enteredAPIKey = ""
     @Published private(set) var hasStoredAPIKey: Bool
     @Published private(set) var isCheckingStoredAPIKey = true
@@ -64,6 +70,7 @@ final class CompanionViewModel: ObservableObject {
         self.injectedImageGenerator = imageGenerator
         self.endpointText = UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
         self.modelText = UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
+        self.thinkingEnabled = UserDefaults.standard.object(forKey: "memory.model.thinkingEnabled") as? Bool ?? true
         self.hasStoredAPIKey = false
         self.memoryError = memoryStore.loadWarning
         let initialSnapshot = MaimemoAXSnapshot(
@@ -167,6 +174,11 @@ final class CompanionViewModel: ObservableObject {
 
     var modelIsConfigured: Bool {
         !endpointText.isEmpty && !modelText.isEmpty && hasStoredAPIKey
+    }
+
+    var supportsThinkingToggle: Bool {
+        guard let endpoint = URL(string: endpointText) else { return false }
+        return ModelConfiguration.supportsThinkingToggle(at: endpoint)
     }
 
     func revealMemoryHelp() {
@@ -291,6 +303,8 @@ final class CompanionViewModel: ObservableObject {
         let anchorKind = requestedAnchorKind ?? selectedAnchorKind
         if generatingWord == word && generatingAnchorKind == anchorKind { return }
         let modelName = modelText
+        // Capture the choice now, before waiting for Keychain; in-flight work keeps its mode.
+        let requestThinkingEnabled = thinkingEnabled
         guard let url = URL(string: endpointText), !modelName.isEmpty else {
             openSettings()
             settingsMessage = MemoryHarnessError.notConfigured.localizedDescription
@@ -334,7 +348,8 @@ final class CompanionViewModel: ObservableObject {
                 }
                 try Task.checkCancellation()
                 guard activeGenerationID == generationID else { return }
-                let configuration = ModelConfiguration(endpoint: url, model: modelName, apiKey: key)
+                let configuration = ModelConfiguration(endpoint: url, model: modelName, apiKey: key,
+                                                       thinkingEnabled: requestThinkingEnabled)
                 let generated = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
                     await self?.receiveQuickHint(hint, generationID: generationID)
                 }
@@ -630,6 +645,21 @@ struct SidebarView: View {
                 SecureField(model.hasStoredAPIKey ? "API Key 已保存；留空沿用" : "API Key", text: $model.enteredAPIKey)
                     .textFieldStyle(.roundedBorder)
                     .disabled(model.isSavingModelSettings)
+                VStack(alignment: .leading, spacing: 7) {
+                    Toggle("开启思考模式", isOn: $model.thinkingEnabled)
+                        .toggleStyle(.switch)
+                        .font(.custom("Songti SC", size: 15))
+                        .tint(accent)
+                        .disabled(!model.supportsThinkingToggle)
+                    Text(model.supportsThinkingToggle
+                         ? "开启：先思考再输出；关闭：直接生成，通常更快。"
+                         : "此开关仅适用于 DeepSeek 官方接口，其他接口不发送思考参数。")
+                        .font(.custom("Songti SC", size: 12))
+                        .foregroundStyle(muted)
+                    Text("开关自动保存，下次生成生效；进行中的请求与已有卡片不变。比较速度请使用尚未生成线索的单词。")
+                        .font(.custom("Songti SC", size: 11))
+                        .foregroundStyle(muted)
+                }
                 HStack {
                     Button("保存模型设置") { model.saveModelSettings() }
                         .buttonStyle(.borderedProminent)

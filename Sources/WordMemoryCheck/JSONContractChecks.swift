@@ -4,6 +4,7 @@ import WordMemoryCore
 @MainActor
 enum JSONContractChecks {
     static func run(card: MemoryCard) async throws {
+        try verifyThinkingToggle()
         let json = String(decoding: try JSONEncoder().encode(card), as: UTF8.self)
         let configuration = ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!,
                                                model: "mock-model", apiKey: "test-only-not-a-credential")
@@ -114,6 +115,39 @@ enum JSONContractChecks {
             throw Failure(message: "HTTP 400 没有报错")
         } catch MemoryHarnessError.requestFailed(400) { }
         try require(FixtureProtocol.requestCount == 1, "接口拒绝参数后自动重发了请求")
+    }
+
+    private static func verifyThinkingToggle() throws {
+        let endpoint = URL(string: "https://api.deepseek.com/chat/completions")!
+        let request = MemoryRequest(word: "state")
+        let defaultConfiguration = ModelConfiguration(endpoint: endpoint, model: "deepseek-flash", apiKey: "test-only")
+        try require(defaultConfiguration.thinkingEnabled, "升级后默认思考模式应保持开启")
+        try require(ModelConfiguration.supportsThinkingToggle(at: endpoint), "DeepSeek 官方接口未识别")
+        try require(!ModelConfiguration.supportsThinkingToggle(at: URL(string: "https://api.deepseek.com.unit.test/chat/completions")!),
+                    "非官方接口错误地获得了 DeepSeek 专有参数")
+        for streaming in [true, false] {
+            var requestBodies: [[String: Any]] = []
+            for enabled in [true, false] {
+                let configuration = ModelConfiguration(endpoint: endpoint, model: "deepseek-flash", apiKey: "test-only",
+                                                       thinkingEnabled: enabled)
+                let http = try OpenAICompatibleClient.makeRequest(request, configuration: configuration, streaming: streaming)
+                var body = try JSONSerialization.jsonObject(with: http.httpBody!) as! [String: Any]
+                try require((body["thinking"] as? [String: String])?["type"] == (enabled ? "enabled" : "disabled"),
+                            "思考开关没有正确映射到同步/流式请求")
+                try require((body["response_format"] as? [String: String])?["type"] == "json_object", "切换思考关闭了 JSON 模式")
+                try require(body["reasoning_effort"] == nil, "开关引入了冲突的思考强度参数")
+                body.removeValue(forKey: "thinking")
+                requestBodies.append(body)
+                let compatible = ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!,
+                                                    model: "mock", apiKey: "test-only", thinkingEnabled: enabled)
+                let compatibleHTTP = try OpenAICompatibleClient.makeRequest(request, configuration: compatible, streaming: streaming)
+                let compatibleBody = try JSONSerialization.jsonObject(with: compatibleHTTP.httpBody!) as! [String: Any]
+                try require(compatibleBody["thinking"] == nil, "向其他兼容接口发送了 DeepSeek 专有参数")
+            }
+            let enabledBody = try JSONSerialization.data(withJSONObject: requestBodies[0], options: .sortedKeys)
+            let disabledBody = try JSONSerialization.data(withJSONObject: requestBodies[1], options: .sortedKeys)
+            try require(enabledBody == disabledBody, "切换思考模式改变了模型、提示词或生成约束")
+        }
     }
 
     private static func envelope(_ text: String) throws -> Data {

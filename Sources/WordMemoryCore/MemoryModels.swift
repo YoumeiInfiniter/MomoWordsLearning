@@ -71,6 +71,33 @@ public struct TransferCheck: Codable, Hashable, Sendable {
     }
 }
 
+public enum MemoryAnchorKind: String, Codable, CaseIterable, Sendable {
+    case sound
+    case letterIllustration
+
+    public var label: String {
+        switch self {
+        case .sound: "谐音联想"
+        case .letterIllustration: "字母插画"
+        }
+    }
+}
+
+/// One primary link from the English word to its reusable meaning.
+public struct MemoryAnchor: Codable, Hashable, Sendable {
+    public let kind: MemoryAnchorKind
+    public let cue: String
+    public let explanation: String
+    public let imagePrompt: String?
+
+    public init(kind: MemoryAnchorKind, cue: String, explanation: String, imagePrompt: String? = nil) {
+        self.kind = kind
+        self.cue = cue
+        self.explanation = explanation
+        self.imagePrompt = imagePrompt
+    }
+}
+
 public struct MemoryCard: Codable, Hashable, Sendable {
     public let word: String
     public let coreConcept: String
@@ -79,8 +106,12 @@ public struct MemoryCard: Codable, Hashable, Sendable {
     public let methods: [MemoryMethod]
     public let transferCheck: TransferCheck
     public let caveat: String?
+    /// Optional so memory.json files written by v1 remain readable.
+    public let anchor: MemoryAnchor?
+    /// The other user-requested approach, if it has already been prepared.
+    public let alternateAnchor: MemoryAnchor?
 
-    public init(word: String, coreConcept: String, coreImage: String, branches: [MeaningBranch], methods: [MemoryMethod], transferCheck: TransferCheck, caveat: String?) {
+    public init(word: String, coreConcept: String, coreImage: String, branches: [MeaningBranch], methods: [MemoryMethod], transferCheck: TransferCheck, caveat: String?, anchor: MemoryAnchor? = nil, alternateAnchor: MemoryAnchor? = nil) {
         self.word = word
         self.coreConcept = coreConcept
         self.coreImage = coreImage
@@ -88,6 +119,36 @@ public struct MemoryCard: Codable, Hashable, Sendable {
         self.methods = methods
         self.transferCheck = transferCheck
         self.caveat = caveat
+        self.anchor = anchor
+        self.alternateAnchor = alternateAnchor
+    }
+
+    public func anchor(for kind: MemoryAnchorKind) -> MemoryAnchor? {
+        if anchor?.kind == kind { return anchor }
+        if alternateAnchor?.kind == kind { return alternateAnchor }
+        return nil
+    }
+
+    public func selectingAnchor(_ kind: MemoryAnchorKind) -> MemoryCard? {
+        guard let selected = anchor(for: kind) else { return nil }
+        let other = anchor?.kind == kind ? alternateAnchor : anchor
+        return replacingAnchors(selected: selected, alternate: other)
+    }
+
+    public func replacingAnchor(_ selected: MemoryAnchor) -> MemoryCard {
+        let other = anchor?.kind == selected.kind ? alternateAnchor : anchor
+        return replacingAnchors(selected: selected, alternate: other)
+    }
+
+    public func withAlternateAnchor(_ alternate: MemoryAnchor?) -> MemoryCard {
+        guard let anchor else { return self }
+        return replacingAnchors(selected: anchor, alternate: alternate)
+    }
+
+    private func replacingAnchors(selected: MemoryAnchor, alternate: MemoryAnchor?) -> MemoryCard {
+        MemoryCard(word: word, coreConcept: coreConcept, coreImage: coreImage,
+                   branches: branches, methods: methods, transferCheck: transferCheck,
+                   caveat: caveat, anchor: selected, alternateAnchor: alternate)
     }
 }
 
@@ -95,11 +156,13 @@ public struct MemoryCard: Codable, Hashable, Sendable {
 public struct QuickMemoryHint: Equatable, Sendable {
     public let word: String
     public let coreConcept: String
-    public let branch: MeaningBranch
+    public let anchor: MemoryAnchor
+    public let branch: MeaningBranch?
 
-    public init(word: String, coreConcept: String, branch: MeaningBranch) {
+    public init(word: String, coreConcept: String, anchor: MemoryAnchor, branch: MeaningBranch? = nil) {
         self.word = word
         self.coreConcept = coreConcept
+        self.anchor = anchor
         self.branch = branch
     }
 }

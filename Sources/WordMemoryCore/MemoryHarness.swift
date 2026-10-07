@@ -24,8 +24,9 @@ public struct MemoryRequest: Sendable {
     public let previousMethod: String?
     public let existingCard: MemoryCard?
     public let focusMeaningKey: String?
+    public let preferredAnchorKind: MemoryAnchorKind
 
-    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil) {
+    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil, preferredAnchorKind: MemoryAnchorKind = .sound) {
         self.word = word
         self.learnerNote = learnerNote
         self.previousReason = previousReason
@@ -33,6 +34,7 @@ public struct MemoryRequest: Sendable {
         self.previousMethod = previousMethod
         self.existingCard = existingCard
         self.focusMeaningKey = focusMeaningKey
+        self.preferredAnchorKind = preferredAnchorKind
     }
 }
 
@@ -40,15 +42,14 @@ public enum MemoryHarness {
     public static let systemInstructions = """
     你是面向中国考研英语二阅读的词汇记忆教练。目标是在新句中识别当句义项，不是背完词典。
     严格按以下顺序思考，但只输出 JSON：
-    1. 找一个真实且可迁移的核心语义关系；如果不同义项确实不相连，明确在 caveat 说明，不编造统一故事。
-    2. 只选当前常见、对阅读有用的 1 至 3 个词性／义项分支。每个分支给简短英文情境句、可观察的词性或搭配信号、中文当句意思，并说明如何从核心关系走到该意思。不要堆叠中文同义词。
-    3. 给 2 至 5 个有差异的记忆方法，从情境、画面、对比、可靠词形／搭配、谐音、个人联想中择其适用者。先保证理解；谐音和拆字仅为个人辅助联想，不能冒充词源、构词事实或标准发音。若无法做出靠谱谐音，宁可不提供。
-    4. 给一个自编、简短、纯英文的新句用于迁移检查。answer 和 clue 单独提供，界面会先隐藏它们。句子不能只是前面情境句换几个无关词。
-    5. 只把用户明确提供的感受和困难当成用户事实；没有反馈时所有方法都只是待试用建议。不要声称用户已掌握或某方法有效。
-    6. 不确定的词源或罕见义项宁可不写；若重要事实需要核查，在 caveat 标出待核验。
-    输出字段按下面示例的顺序，不要在 JSON 前后添加说明；第一个 branches 对象优先写最有助于理解当前词的常见语境。
-    返回一个 JSON object，字段精确为：
-    {"word":"英文词","coreConcept":"中文核心关系","branches":[{"partOfSpeech":"词性","meaningKey":"简短稳定英文义项键","chineseMeaning":"当句中文意思","context":"自编英文短句","signal":"句中可观察信号","explanation":"核心关系如何在这里变义"}],"coreImage":"一句简短画面","methods":[{"id":"m1","kind":"context|image|contrast|morphology|sound|personal","title":"短标题","cue":"具体记忆钩子","whyItHelps":"为什么有助于回忆","isLanguageFact":false}],"transferCheck":{"sentence":"自编英文新句","targetBranch":"与某个 meaningKey 完全一致","answer":"当句意思","clue":"句中判断线索"},"caveat":null}
+    1. 找一个真实且可迁移的核心语义关系，优先检查常见名词、动词、形容词等用法；如果不同义项确实不相连，明确在 caveat 说明，不编造统一故事。
+    2. 为“英文词形／声音 → 核心语义”写一个主钩子 anchor，kind 必须严格等于用户指定的类型，不能自行改成另一种。sound 要有与读音大致相近、且能自然指向可迁移核心意思的中文短句；不能冒充标准发音或词源，不要为了押音硬编不通的句子。若确实没有可信的谐音，就在 cue 简短写“暂无自然谐音”，在 explanation 说明原因，不要伪造发音。letterIllustration 要把当前英文词的字母按原顺序融入一幅能表达核心关系的趣味图；若单词兼有抽象或动词义，画面不能只画具体名词物品，应提供能连接这些义项的动作或关系。imagePrompt 用英文写具体画面、字母造型、构图和禁止拼错／多余文字，cue 和 explanation 用简短中文解释视觉关联。
+    3. 只选当前最有帮助的一个常见语境分支，给简短英文句子、可观察信号、当句中文意思，并说明核心关系如何在这里落地；若直观名词义已由背词软件展示，而这个词还有常见抽象动词／形容词义，优先用后者检验核心关系。不要堆叠中文同义词，也不要替代背词软件的词典。
+    4. 其他记忆方法只作为内部候选，不在主界面罗列；谐音、拆字或画面联想不能冒充语言事实。
+    5. 给一个自编、简短、纯英文的新句用于内部迁移检查。answer 和 clue 单独提供。句子不能只是前面情境句换几个无关词。
+    6. 只把用户明确提供的感受和困难当成用户事实；没有反馈时所有方法都只是待试用建议。不确定的词源或罕见义项宁可不写。
+    输出格式严格遵循本次请求提供的 JSON 输出契约和示例。所有内容写入指定字段，不能在 JSON 前后添加说明。
+    当 anchor.kind 是 letterIllustration，imagePrompt 必须为非空英文提示词，并写出当前英文词的准确拼写；sound 时 imagePrompt 必须是 JSON null，不能写成字符串 "null"。
     """
 
     public static func userPrompt(_ request: MemoryRequest) -> String {
@@ -60,36 +61,74 @@ public enum MemoryHarness {
         当前单词：\(request.word)
         用户原话／卡点：\(note.isEmpty ? "未提供" : note)
         上次遗忘原因：\(request.previousReason?.label ?? "未记录")
-        想尝试的记法：\(request.preferredMethod?.label ?? "由你判断")
+        用户指定的主联想：\(request.preferredAnchorKind.rawValue)（必须保持，不可自行改选）
+        想尝试的其他记法：\(request.preferredMethod?.label ?? "未指定")
         旧记法（若无效请改对应部分）：\(request.previousMethod ?? "无")
         已有核心关系：\(request.existingCard?.coreConcept ?? "无")
         已有义项键：\(previousBranches)
         本次重点义项键：\(request.focusMeaningKey ?? "未指定")
-        只处理这个词。若用户说名词会、动词忘，只优先重做动词分支；保留有效的核心关系。
+        只处理这个词。主联想要帮助记住核心关系，不要仅描绘某一个名词义。已有核心关系若只覆盖具体名词而遗漏常见动词／形容词义，请修正为更可迁移的关系；确实不能相连的义项写入 caveat，不能硬凑。若用户说名词会、动词忘，只优先重做动词分支；保留仍然有效的部分。
         重做记法时必须保留本次重点义项的 meaningKey，未变化的义项也沿用原 meaningKey，避免丢失个人反馈历史。
         """
     }
 
-    public static func parse(_ raw: String, expectedWord: String, requiredMeaningKey: String? = nil) throws -> MemoryCard {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let json: String
-        if trimmed.hasPrefix("```") {
-            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
-            json = lines.dropFirst().dropLast().joined(separator: "\n")
-        } else {
-            json = trimmed
-        }
-        guard let data = json.data(using: .utf8),
-              let card = try? JSONDecoder().decode(MemoryCard.self, from: data) else {
-            throw MemoryHarnessError.invalidResponse("无法解析 JSON")
+    public static func parse(_ raw: String, expectedWord: String, requiredMeaningKey: String? = nil, requiredAnchorKind: MemoryAnchorKind? = nil) throws -> MemoryCard {
+        let data = try MemoryResponseContract.normalizedData(from: raw)
+        let card: MemoryCard
+        do {
+            card = try JSONDecoder().decode(MemoryCard.self, from: data)
+        } catch let error as DecodingError {
+            func path(_ keys: [any CodingKey]) -> String {
+                keys.map { $0.intValue.map { "[\($0)]" } ?? $0.stringValue }.joined(separator: ".")
+            }
+            let reason: String
+            switch error {
+            case .keyNotFound(let key, let context):
+                reason = "缺少必填字段 \(path(context.codingPath + [key]))"
+            case .typeMismatch(_, let context):
+                reason = "字段类型不符合约定：\(path(context.codingPath))"
+            case .valueNotFound(_, let context):
+                reason = "必填字段不能为 null：\(path(context.codingPath))"
+            case .dataCorrupted(let context):
+                reason = context.codingPath.isEmpty ? "JSON 语法无效" : "字段值不符合约定：\(path(context.codingPath))"
+            @unknown default: reason = "JSON 结构不符合约定"
+            }
+            throw MemoryHarnessError.invalidResponse(reason)
         }
         guard card.word.caseInsensitiveCompare(expectedWord) == .orderedSame else {
             throw MemoryHarnessError.invalidResponse("单词与当前词不匹配")
         }
-        guard !card.coreConcept.isEmpty, !card.branches.isEmpty, !card.methods.isEmpty else {
+        func hasText(_ text: String) -> Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard hasText(card.coreConcept), hasText(card.coreImage), !card.branches.isEmpty, !card.methods.isEmpty else {
             throw MemoryHarnessError.invalidResponse("核心关系、语境或记法缺失")
         }
+        guard let anchor = card.anchor,
+              !anchor.cue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !anchor.explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MemoryHarnessError.invalidResponse("单词与核心意思之间缺少主联想")
+        }
+        if let requiredAnchorKind, anchor.kind != requiredAnchorKind {
+            throw MemoryHarnessError.invalidResponse("模型没有按用户选择生成\(requiredAnchorKind.label)")
+        }
+        guard card.alternateAnchor == nil else {
+            throw MemoryHarnessError.invalidResponse("模型不应自行附加第二种联想")
+        }
+        switch anchor.kind {
+        case .sound:
+            guard anchor.imagePrompt == nil else {
+                throw MemoryHarnessError.invalidResponse("谐音联想不应附带生图提示词")
+            }
+        case .letterIllustration:
+            guard let prompt = anchor.imagePrompt,
+                  !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  promptContainsWord(prompt, word: card.word) else {
+                throw MemoryHarnessError.invalidResponse("字母插画提示词必须包含准确单词")
+            }
+        }
         let keys = Set(card.branches.map(\.meaningKey))
+        guard card.branches.allSatisfy({ branch in
+            [branch.partOfSpeech, branch.meaningKey, branch.chineseMeaning, branch.context, branch.signal, branch.explanation].allSatisfy(hasText)
+        }) else { throw MemoryHarnessError.invalidResponse("语境分支包含空字段") }
         guard keys.count == card.branches.count else {
             throw MemoryHarnessError.invalidResponse("义项键重复")
         }
@@ -97,11 +136,13 @@ public enum MemoryHarness {
             throw MemoryHarnessError.invalidResponse("本次重点义项键未保留")
         }
         guard keys.contains(card.transferCheck.targetBranch),
-              !card.transferCheck.sentence.isEmpty,
-              !card.transferCheck.answer.isEmpty else {
+              hasText(card.transferCheck.sentence), hasText(card.transferCheck.answer), hasText(card.transferCheck.clue) else {
             throw MemoryHarnessError.invalidResponse("新句与义项无法对应")
         }
         let ids = card.methods.map(\.id)
+        guard card.methods.allSatisfy({ method in
+            [method.id, method.title, method.cue, method.whyItHelps].allSatisfy(hasText)
+        }) else { throw MemoryHarnessError.invalidResponse("记法包含空字段") }
         guard Set(ids).count == ids.count else {
             throw MemoryHarnessError.invalidResponse("记法 ID 重复")
         }
@@ -122,18 +163,29 @@ public enum MemoryHarness {
               let conceptStart = topLevelValueStart("coreConcept", in: bytes),
               let concept = decodedString(at: conceptStart, in: bytes),
               !concept.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let branchesStart = topLevelValueStart("branches", in: bytes),
-              branchesStart < bytes.count, bytes[branchesStart] == 91 else { return nil }
+              let anchorStart = topLevelValueStart("anchor", in: bytes),
+              anchorStart < bytes.count, bytes[anchorStart] == 123,
+              let anchorEnd = completeObjectEnd(at: anchorStart, in: bytes),
+              let anchor = try? JSONDecoder().decode(MemoryAnchor.self, from: Data(bytes[anchorStart...anchorEnd])),
+              !anchor.cue.isEmpty, !anchor.explanation.isEmpty else { return nil }
+        if anchor.kind == .letterIllustration {
+            guard let prompt = anchor.imagePrompt,
+                  promptContainsWord(prompt, word: word) else { return nil }
+        } else if anchor.imagePrompt != nil {
+            return nil
+        }
 
-        var position = branchesStart + 1
-        while position < bytes.count && isWhitespace(bytes[position]) { position += 1 }
-        guard position < bytes.count, bytes[position] == 123,
-              let end = completeObjectEnd(at: position, in: bytes),
-              let branch = try? JSONDecoder().decode(MeaningBranch.self, from: Data(bytes[position...end])),
-              !branch.context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !branch.chineseMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !branch.meaningKey.isEmpty else { return nil }
-        return QuickMemoryHint(word: word, coreConcept: concept, branch: branch)
+        var branch: MeaningBranch?
+        if let branchesStart = topLevelValueStart("branches", in: bytes),
+           branchesStart < bytes.count, bytes[branchesStart] == 91 {
+            var position = branchesStart + 1
+            while position < bytes.count && isWhitespace(bytes[position]) { position += 1 }
+            if position < bytes.count, bytes[position] == 123,
+               let end = completeObjectEnd(at: position, in: bytes) {
+                branch = try? JSONDecoder().decode(MeaningBranch.self, from: Data(bytes[position...end]))
+            }
+        }
+        return QuickMemoryHint(word: word, coreConcept: concept, anchor: anchor, branch: branch)
     }
 
     private static func topLevelValueStart(_ name: String, in bytes: [UInt8]) -> Int? {
@@ -206,5 +258,11 @@ public enum MemoryHarness {
 
     private static func isWhitespace(_ byte: UInt8) -> Bool {
         byte == 32 || byte == 9 || byte == 10 || byte == 13
+    }
+
+    private static func promptContainsWord(_ prompt: String, word: String) -> Bool {
+        let escaped = NSRegularExpression.escapedPattern(for: word)
+        let pattern = "(?<![A-Za-z])\(escaped)(?![A-Za-z])"
+        return prompt.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 }

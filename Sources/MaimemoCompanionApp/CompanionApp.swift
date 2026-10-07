@@ -9,7 +9,11 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var diagnosticSnapshot: MaimemoAXSnapshot
     @Published private(set) var lastChangeAt: Date?
     @Published private(set) var memoryCard: MemoryCard?
+    @Published private(set) var memoryImageURL: URL?
+    @Published private(set) var imageGeneratingWord: String?
+    @Published var imageError: String?
     @Published private(set) var isMemoryRevealed = false
+    @Published private(set) var selectedAnchorKind: MemoryAnchorKind = .sound
     @Published private(set) var isShowingLastCapturedWord = false
     @Published private(set) var selectedBranchID: String?
     @Published private(set) var quickHint: QuickMemoryHint?
@@ -23,26 +27,50 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var isSavingModelSettings = false
     @Published var endpointText: String
     @Published var modelText: String
+    @Published var thinkingEnabled: Bool {
+        didSet {
+            // Saving this preference never starts or restarts a model request.
+            UserDefaults.standard.set(thinkingEnabled, forKey: "memory.model.thinkingEnabled")
+        }
+    }
     @Published var enteredAPIKey = ""
     @Published private(set) var hasStoredAPIKey: Bool
     @Published private(set) var isCheckingStoredAPIKey = true
+    @Published var enteredImageAPIKey = ""
+    @Published private(set) var hasStoredImageAPIKey = false
+    @Published private(set) var isCheckingImageAPIKey = true
+    @Published private(set) var isSavingImageKey = false
+    @Published var imageSettingsMessage: String?
 
     let reader: MaimemoAccessibilityReader
     let memoryStore: MemoryStore
+    let imageStore: MemoryImageStore
+    private let injectedImageGenerator: (any MemoryImageGenerator)?
     private var previousWord: String?
     private var lastScanSnapshot: MaimemoAXSnapshot
     private let modelClient = OpenAICompatibleClient()
     private var quickHints: [String: QuickMemoryHint] = [:]
     private var generationTask: Task<Void, Never>?
     private var activeGenerationID: UUID?
+    private var generatingAnchorKind: MemoryAnchorKind?
+    private var imageSelectionIntent: String?
+    private var imageGenerationTask: Task<Void, Never>?
+    private var activeImageGenerationID: UUID?
 
     var isGenerating: Bool { generatingWord == snapshot.word && generatingWord != nil }
+    var isGeneratingCurrentImage: Bool { imageGeneratingWord == snapshot.word && imageGeneratingWord != nil }
+    var imageGenerator: (any MemoryImageGenerator)? {
+        injectedImageGenerator ?? (hasStoredImageAPIKey ? MaiziImageGenerator() : nil)
+    }
 
-    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore()) {
+    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore(), imageStore: MemoryImageStore = MemoryImageStore(), imageGenerator: (any MemoryImageGenerator)? = nil) {
         self.reader = reader
         self.memoryStore = memoryStore
+        self.imageStore = imageStore
+        self.injectedImageGenerator = imageGenerator
         self.endpointText = UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
         self.modelText = UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
+        self.thinkingEnabled = UserDefaults.standard.object(forKey: "memory.model.thinkingEnabled") as? Bool ?? true
         self.hasStoredAPIKey = false
         self.memoryError = memoryStore.loadWarning
         let initialSnapshot = MaimemoAXSnapshot(
@@ -68,6 +96,14 @@ final class CompanionViewModel: ObservableObject {
             self.isCheckingStoredAPIKey = false
             self.generateRevealedCardIfNeeded()
         }
+        Task { [weak self] in
+            let exists = await Task.detached(priority: .utility) {
+                ImageSecretStore.exists()
+            }.value
+            guard let self else { return }
+            self.hasStoredImageAPIKey = exists
+            self.isCheckingImageAPIKey = false
+        }
     }
 
     func refresh() async -> MaimemoAXSnapshot {
@@ -82,12 +118,20 @@ final class CompanionViewModel: ObservableObject {
         }
         isShowingLastCapturedWord = false
         if next.word != previousWord, next.word != nil {
+            imageSelectionIntent = nil
+            imageGenerationTask?.cancel()
+            imageGenerationTask = nil
+            activeImageGenerationID = nil
+            imageGeneratingWord = nil
             lastChangeAt = Date()
             isMemoryRevealed = false
             selectedMethodKind = nil
             memoryError = memoryStore.loadWarning
             if let word = next.word {
                 memoryCard = memoryStore.card(for: word)
+                selectedAnchorKind = memoryCard?.anchor?.kind ?? .sound
+                memoryImageURL = memoryCard.flatMap { imageURL(for: $0) }
+                imageError = nil
                 quickHint = quickHints[word.lowercased()]
                 selectedBranchID = memoryCard?.branches.first?.id
                 showAnswer = false
@@ -98,7 +142,15 @@ final class CompanionViewModel: ObservableObject {
                 }
             }
         } else if next.word == nil, previousWord != nil {
+            imageSelectionIntent = nil
+            imageGenerationTask?.cancel()
+            imageGenerationTask = nil
+            activeImageGenerationID = nil
+            imageGeneratingWord = nil
             memoryCard = nil
+            selectedAnchorKind = .sound
+            memoryImageURL = nil
+            imageError = nil
             quickHint = nil
             selectedBranchID = nil
             isMemoryRevealed = false
@@ -124,6 +176,11 @@ final class CompanionViewModel: ObservableObject {
         !endpointText.isEmpty && !modelText.isEmpty && hasStoredAPIKey
     }
 
+    var supportsThinkingToggle: Bool {
+        guard let endpoint = URL(string: endpointText) else { return false }
+        return ModelConfiguration.supportsThinkingToggle(at: endpoint)
+    }
+
     func revealMemoryHelp() {
         guard snapshot.word != nil, !isMemoryRevealed else { return }
         isMemoryRevealed = true
@@ -139,6 +196,44 @@ final class CompanionViewModel: ObservableObject {
         guard snapshot.word != nil, isMemoryRevealed, !showSettings,
               memoryCard == nil, quickHint == nil, !isGenerating, modelIsConfigured else { return }
         generateMemoryCard()
+    }
+
+    func chooseAnchor(_ kind: MemoryAnchorKind) {
+        guard isMemoryRevealed, let word = snapshot.word else { return }
+        selectedAnchorKind = kind
+        imageError = nil
+        imageSelectionIntent = kind == .letterIllustration ? word : nil
+        if let card = memoryCard, let selected = card.selectingAnchor(kind) {
+            if generatingWord == word {
+                generationTask?.cancel()
+                generationTask = nil
+                activeGenerationID = nil
+                generatingWord = nil
+                generatingAnchorKind = nil
+                quickHint = nil
+                quickHints.removeValue(forKey: word.lowercased())
+            }
+            do {
+                if card.anchor?.kind != kind { try memoryStore.save(selected) }
+                memoryCard = selected
+                memoryImageURL = imageURL(for: selected)
+                if kind == .letterIllustration {
+                    imageSelectionIntent = nil
+                    generateImageIfNeeded(for: selected)
+                }
+            } catch {
+                imageSelectionIntent = nil
+                memoryError = "联想方式保存失败：\(error.localizedDescription)"
+            }
+        } else {
+            generateMemoryCard(requestedAnchorKind: kind, switchingAnchor: memoryCard != nil)
+        }
+    }
+
+    func retrySelectedAnchor() {
+        guard isMemoryRevealed, let word = snapshot.word else { return }
+        imageSelectionIntent = selectedAnchorKind == .letterIllustration ? word : nil
+        generateMemoryCard(requestedAnchorKind: selectedAnchorKind, switchingAnchor: memoryCard != nil)
     }
 
     func saveModelSettings() {
@@ -179,10 +274,37 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
-    func generateMemoryCard() {
+    func saveImageSettings() {
+        guard !isSavingImageKey else { return }
+        let key = enteredImageAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            imageSettingsMessage = hasStoredImageAPIKey ? "图片生成 Key 已保存；无需重复输入" : "请填写图片生成 API Key"
+            return
+        }
+        isSavingImageKey = true
+        imageSettingsMessage = nil
+        Task { @MainActor in
+            defer { isSavingImageKey = false }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try ImageSecretStore.save(key)
+                }.value
+                enteredImageAPIKey = ""
+                hasStoredImageAPIKey = true
+                imageSettingsMessage = "图片生成 Key 已保存在本机钥匙串"
+            } catch {
+                imageSettingsMessage = "图片生成 Key 保存失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false) {
         guard let word = snapshot.word else { return }
-        if generatingWord == word { return }
+        let anchorKind = requestedAnchorKind ?? selectedAnchorKind
+        if generatingWord == word && generatingAnchorKind == anchorKind { return }
         let modelName = modelText
+        // Capture the choice now, before waiting for Keychain; in-flight work keeps its mode.
+        let requestThinkingEnabled = thinkingEnabled
         guard let url = URL(string: endpointText), !modelName.isEmpty else {
             openSettings()
             settingsMessage = MemoryHarnessError.notConfigured.localizedDescription
@@ -196,8 +318,10 @@ final class CompanionViewModel: ObservableObject {
             preferredMethod: selectedMethodKind,
             previousMethod: previous?.methodVersions.last?.method.cue,
             existingCard: memoryCard,
-            focusMeaningKey: selectedBranch?.meaningKey
+            focusMeaningKey: switchingAnchor ? nil : selectedBranch?.meaningKey,
+            preferredAnchorKind: anchorKind
         )
+        let existingCard = switchingAnchor ? memoryCard : nil
         if let oldWord = generatingWord {
             generationTask?.cancel()
             quickHints.removeValue(forKey: oldWord.lowercased())
@@ -206,6 +330,7 @@ final class CompanionViewModel: ObservableObject {
         let generationID = UUID()
         activeGenerationID = generationID
         generatingWord = word
+        generatingAnchorKind = anchorKind
         quickHint = nil
         memoryError = nil
         generationTask = Task { [weak self] in
@@ -223,25 +348,34 @@ final class CompanionViewModel: ObservableObject {
                 }
                 try Task.checkCancellation()
                 guard activeGenerationID == generationID else { return }
-                let configuration = ModelConfiguration(endpoint: url, model: modelName, apiKey: key)
-                let card = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
+                let configuration = ModelConfiguration(endpoint: url, model: modelName, apiKey: key,
+                                                       thinkingEnabled: requestThinkingEnabled)
+                let generated = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
                     await self?.receiveQuickHint(hint, generationID: generationID)
                 }
                 try Task.checkCancellation()
                 guard activeGenerationID == generationID else { return }
+                let card = if let existingCard {
+                    generated.withAlternateAnchor(existingCard.anchor(for: anchorKind == .sound ? .letterIllustration : .sound))
+                } else {
+                    generated
+                }
                 try memoryStore.save(card)
                 quickHints.removeValue(forKey: word.lowercased())
-                if snapshot.word == word {
+                if snapshot.word == word && selectedAnchorKind == anchorKind {
                     memoryCard = card
+                    memoryImageURL = imageURL(for: card)
                     quickHint = nil
                     selectedBranchID = card.branches.first?.id
                     showAnswer = false
+                    if anchorKind == .letterIllustration && imageSelectionIntent == word {
+                        imageSelectionIntent = nil
+                        generateImageIfNeeded(for: card)
+                    }
                 }
             } catch {
                 if activeGenerationID == generationID && !Task.isCancelled {
-                    quickHints.removeValue(forKey: word.lowercased())
                     if snapshot.word == word {
-                        quickHint = nil
                         memoryError = error.localizedDescription
                     }
                 }
@@ -262,7 +396,53 @@ final class CompanionViewModel: ObservableObject {
         guard activeGenerationID == generationID else { return }
         activeGenerationID = nil
         generatingWord = nil
+        generatingAnchorKind = nil
         generationTask = nil
+    }
+
+    private func imageURL(for card: MemoryCard) -> URL? {
+        guard card.anchor?.kind == .letterIllustration,
+              let prompt = card.anchor?.imagePrompt else { return nil }
+        return imageStore.imageURL(for: card.word, prompt: prompt)
+    }
+
+    private func generateImageIfNeeded(for card: MemoryCard) {
+        guard isMemoryRevealed, snapshot.word == card.word,
+              card.anchor?.kind == .letterIllustration,
+              let prompt = card.anchor?.imagePrompt,
+              let imageGenerator,
+              imageStore.imageURL(for: card.word, prompt: prompt) == nil else { return }
+        if imageGeneratingWord == card.word { return }
+        imageGenerationTask?.cancel()
+        let generationID = UUID()
+        activeImageGenerationID = generationID
+        imageGeneratingWord = card.word
+        imageError = nil
+        let imageStore = self.imageStore
+        imageGenerationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let image = try await imageGenerator.generateImage(prompt: prompt)
+                try Task.checkCancellation()
+                guard activeImageGenerationID == generationID else { return }
+                let url = try await Task.detached(priority: .utility) {
+                    try imageStore.save(image, for: card.word, prompt: prompt)
+                }.value
+                try Task.checkCancellation()
+                if activeImageGenerationID == generationID && snapshot.word == card.word {
+                    memoryImageURL = url
+                }
+            } catch {
+                if activeImageGenerationID == generationID && !Task.isCancelled && snapshot.word == card.word {
+                    imageError = error.localizedDescription
+                }
+            }
+            if activeImageGenerationID == generationID {
+                activeImageGenerationID = nil
+                imageGeneratingWord = nil
+                imageGenerationTask = nil
+            }
+        }
     }
 
     func selectBranch(_ branch: MeaningBranch) {
@@ -346,7 +526,7 @@ struct SidebarView: View {
                             }
                             if model.isMemoryRevealed {
                                 wordCard
-                                MemoryPanelView(model: model)
+                                MemoryLinkPanelView(model: model)
                             } else {
                                 revealSurface(minHeight: geometry.size.height - 140)
                             }
@@ -367,7 +547,7 @@ struct SidebarView: View {
         } label: {
             VStack(alignment: .leading, spacing: 24) {
                 wordCard
-                MemoryPanelView(model: model)
+                MemoryLinkPanelView(model: model)
             }
             .frame(maxWidth: .infinity, minHeight: max(0, minHeight), alignment: .topLeading)
             .contentShape(Rectangle())
@@ -465,6 +645,21 @@ struct SidebarView: View {
                 SecureField(model.hasStoredAPIKey ? "API Key 已保存；留空沿用" : "API Key", text: $model.enteredAPIKey)
                     .textFieldStyle(.roundedBorder)
                     .disabled(model.isSavingModelSettings)
+                VStack(alignment: .leading, spacing: 7) {
+                    Toggle("开启思考模式", isOn: $model.thinkingEnabled)
+                        .toggleStyle(.switch)
+                        .font(.custom("Songti SC", size: 15))
+                        .tint(accent)
+                        .disabled(!model.supportsThinkingToggle)
+                    Text(model.supportsThinkingToggle
+                         ? "开启：先思考再输出；关闭：直接生成，通常更快。"
+                         : "此开关仅适用于 DeepSeek 官方接口，其他接口不发送思考参数。")
+                        .font(.custom("Songti SC", size: 12))
+                        .foregroundStyle(muted)
+                    Text("开关自动保存，下次生成生效；进行中的请求与已有卡片不变。比较速度请使用尚未生成线索的单词。")
+                        .font(.custom("Songti SC", size: 11))
+                        .foregroundStyle(muted)
+                }
                 HStack {
                     Button("保存模型设置") { model.saveModelSettings() }
                         .buttonStyle(.borderedProminent)
@@ -482,9 +677,39 @@ struct SidebarView: View {
             }
             .padding(20)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+            imageSettingsCard
             permissionCard
             debugCard
         }
+    }
+
+    private var imageSettingsCard: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Text("字母插画")
+                .font(.custom("Songti SC", size: 21))
+            Text("gpt-image-2.5 · 1:1 · 1K · 每次一张。只有你主动选择插画且本机没有缓存时才会调用图片服务。")
+                .font(.custom("Songti SC", size: 13))
+                .foregroundStyle(muted)
+            SecureField(model.hasStoredImageAPIKey ? "图片生成 Key 已保存；留空沿用" : "图片生成 API Key", text: $model.enteredImageAPIKey)
+                .textFieldStyle(.roundedBorder)
+                .disabled(model.isSavingImageKey)
+            HStack(spacing: 10) {
+                Button("保存图片 Key") { model.saveImageSettings() }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isSavingImageKey)
+                if model.isSavingImageKey { ProgressView().controlSize(.small) }
+            }
+            if let message = model.imageSettingsMessage {
+                Text(message)
+                    .font(.custom("Songti SC", size: 12))
+                    .foregroundStyle(accent)
+            }
+            Text("图片服务与记忆模型分别配置；密钥仅存于 macOS 钥匙串，生成图片保存在本机。首次生成和手动重试都可能产生费用。")
+                .font(.custom("Songti SC", size: 12))
+                .foregroundStyle(muted)
+        }
+        .padding(20)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
     }
 
     private var debugCard: some View {

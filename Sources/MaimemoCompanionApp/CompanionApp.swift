@@ -245,6 +245,30 @@ final class CompanionViewModel: ObservableObject {
         generateMemoryCard(requestedAnchorKind: .sound, isAnchorRevision: true)
     }
 
+    var soundHistory: SoundAnchorHistory {
+        guard let word = snapshot.word else { return SoundAnchorHistory(cards: [], selectedIndex: 0) }
+        return memoryStore.soundHistory(for: word)
+    }
+
+    func moveSoundHistory(by offset: Int) {
+        guard isMemoryRevealed, selectedAnchorKind == .sound, !isGenerating,
+              let word = snapshot.word else { return }
+        do {
+            guard let card = try memoryStore.moveSoundHistory(for: word, by: offset) else { return }
+            memoryCard = card
+            memoryImageURL = nil
+            quickHint = nil
+            quickHints.removeValue(forKey: word.lowercased())
+            learnerNote = ""
+            memoryError = nil
+            selectedBranchID = card.branches.first?.id
+            showAnswer = false
+            imageSelectionIntent = nil
+        } catch {
+            memoryError = "历史联想切换失败：\(error.localizedDescription)"
+        }
+    }
+
     func saveModelSettings() {
         guard !isSavingModelSettings else { return }
         let endpoint = endpointText.trimmingCharacters(in: .whitespacesAndNewlines)

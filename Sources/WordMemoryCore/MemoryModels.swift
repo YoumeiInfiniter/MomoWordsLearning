@@ -166,6 +166,29 @@ public struct MemoryCardRevision: Codable, Sendable {
     }
 }
 
+/// Ordered sound-card snapshots and the user's persisted local selection.
+public struct SoundAnchorHistory: Codable, Sendable {
+    public var cards: [MemoryCard]
+    public var selectedIndex: Int
+
+    public init(cards: [MemoryCard], selectedIndex: Int) {
+        self.cards = cards
+        self.selectedIndex = selectedIndex
+    }
+
+    public func canMove(by offset: Int) -> Bool {
+        guard offset == -1 || offset == 1, cards.indices.contains(selectedIndex) else { return false }
+        return cards.indices.contains(selectedIndex + offset)
+    }
+
+    public func moving(by offset: Int) -> SoundAnchorHistory? {
+        guard canMove(by: offset) else { return nil }
+        var history = self
+        history.selectedIndex += offset
+        return history
+    }
+}
+
 /// A provisional first clue. It is never persisted; only a fully validated card is saved.
 public struct QuickMemoryHint: Equatable, Sendable {
     public let word: String

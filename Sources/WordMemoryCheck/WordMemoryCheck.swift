@@ -14,11 +14,12 @@ struct WordMemoryCheck {
         try validateSSEFraming()
         try verifyHistory()
         try verifySoundRevisions()
+        try verifySoundNavigation()
         try preventOverwriteOfUnreadableHistory()
         try verifyImageStorage()
         try verifyMaiziImageResponse()
         try await JSONContractChecks.run(card: sampleCard())
-        print("word-memory-check: 通过联想重做、可选原因、旧卡归档、失败保护、思考开关、JSON、单次请求与存储检查")
+        print("word-memory-check: 通过历史导航与持久选择、联想重做、可选原因、旧卡归档、失败保护、思考开关、JSON、单次请求与存储检查")
     }
 
     private static func validateSSEFraming() throws {
@@ -250,6 +251,75 @@ struct WordMemoryCheck {
         } catch is CocoaError { }
         guard store.card(for: "state") == second, store.revisions(for: "state").count == 2 else {
             throw CheckError.failed("写入失败后旧联想未保留")
+        }
+    }
+
+    private static func verifySoundNavigation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MaimemoNavigationCheck-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("memory.json")
+        let image = MemoryAnchor(kind: .letterIllustration, cue: "保留插画", explanation: "历史切换不生图", imagePrompt: "Draw STATE")
+        let original = sampleCard().withAlternateAnchor(image)
+        let first = original.replacingAnchor(MemoryAnchor(kind: .sound, cue: "第一版", explanation: "第一版解释"))
+        let second = first.replacingAnchor(MemoryAnchor(kind: .sound, cue: "第二版", explanation: "第二版解释"))
+        let store = MemoryStore(fileURL: file)
+        try store.save(original)
+        try store.save(first, replacing: original)
+        try store.save(second, replacing: first)
+        guard store.soundHistory(for: "STATE").cards == [original, first, second],
+              store.soundHistory(for: "state").selectedIndex == 2,
+              try store.moveSoundHistory(for: "state", by: 1) == nil,
+              try store.moveSoundHistory(for: "state", by: 0) == nil,
+              try store.moveSoundHistory(for: "state", by: -1) == first else {
+            throw CheckError.failed("历史顺序或边界导航错误")
+        }
+        let reloaded = MemoryStore(fileURL: file)
+        guard reloaded.card(for: "state") == first,
+              reloaded.soundHistory(for: "state").selectedIndex == 1,
+              reloaded.revisions(for: "state").count == 2,
+              try reloaded.moveSoundHistory(for: "state", by: -1) == original,
+              try reloaded.moveSoundHistory(for: "state", by: -1) == nil,
+              try reloaded.moveSoundHistory(for: "state", by: 1) == first,
+              try reloaded.moveSoundHistory(for: "state", by: 1) == second,
+              try reloaded.moveSoundHistory(for: "missing", by: -1) == nil else {
+            throw CheckError.failed("历史选择未持久化、导航改变了修订记录或跨词串记录")
+        }
+        _ = try reloaded.moveSoundHistory(for: "state", by: -1)
+        try reloaded.save(first.selectingAnchor(.letterIllustration)!)
+        try reloaded.save(first)
+        guard reloaded.soundHistory(for: "state").cards == [original, first, second],
+              reloaded.soundHistory(for: "state").canMove(by: 1) else {
+            throw CheckError.failed("切换记法丢失了下一条记录")
+        }
+        _ = try reloaded.moveSoundHistory(for: "state", by: -1)
+        let third = original.replacingAnchor(MemoryAnchor(kind: .sound, cue: "从旧版修改", explanation: "保留后续其他版本"))
+        try reloaded.save(third, replacing: original)
+        guard reloaded.soundHistory(for: "state").cards == [original, first, second, third],
+              reloaded.soundHistory(for: "state").selectedIndex == 3,
+              reloaded.revisions(for: "state").count == 3,
+              third.alternateAnchor == image else {
+            throw CheckError.failed("从旧版继续修改丢失了已有版本或插画")
+        }
+        // Simulate a 0.3.4 file with archives but no navigation timeline.
+        var legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        legacy.removeValue(forKey: "soundHistories")
+        try JSONSerialization.data(withJSONObject: legacy).write(to: file)
+        let migrated = MemoryStore(fileURL: file)
+        guard migrated.loadWarning == nil,
+              migrated.soundHistory(for: "state").cards == [original, first, original, third],
+              try migrated.moveSoundHistory(for: "state", by: -1) == original,
+              MemoryStore(fileURL: file).soundHistory(for: "state").selectedIndex == 2 else {
+            throw CheckError.failed("旧版归档迁移或保存选择失败")
+        }
+        try FileManager.default.moveItem(at: file, to: directory.appendingPathComponent("saved.json"))
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: true)
+        do {
+            _ = try migrated.moveSoundHistory(for: "state", by: 1)
+            throw CheckError.failed("历史选择意外写入不可写位置")
+        } catch is CocoaError { }
+        guard migrated.card(for: "state") == original,
+              migrated.soundHistory(for: "state").selectedIndex == 2 else {
+            throw CheckError.failed("保存失败却改变了历史选择")
         }
     }
 

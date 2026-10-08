@@ -18,6 +18,7 @@ public final class MemoryStore {
         var branches: [String: BranchMemory] = [:]
         // Optional for memory.json files written before revision history existed.
         var revisions: [String: [MemoryCardRevision]]?
+        var soundHistories: [String: SoundAnchorHistory]?
     }
 
     public let fileURL: URL
@@ -54,6 +55,34 @@ public final class MemoryStore {
         state.revisions?[word.lowercased()] ?? []
     }
 
+    public func soundHistory(for word: String) -> SoundAnchorHistory {
+        let key = word.lowercased()
+        if let history = state.soundHistories?[key], history.cards.indices.contains(history.selectedIndex),
+           history.cards.allSatisfy({ $0.word.lowercased() == key && $0.anchor(for: .sound) != nil }) {
+            return history
+        }
+        // Migrate 0.3.4 archives in memory; no write until the user changes selection.
+        var cards = revisions(for: word).compactMap {
+            $0.previousCard.word.lowercased() == key ? $0.previousCard.selectingAnchor(.sound) : nil
+        }
+        if let current = state.cards[key]?.selectingAnchor(.sound) { cards.append(current) }
+        return SoundAnchorHistory(cards: cards, selectedIndex: max(0, cards.count - 1))
+    }
+
+    @discardableResult
+    public func moveSoundHistory(for word: String, by offset: Int) throws -> MemoryCard? {
+        guard let history = soundHistory(for: word).moving(by: offset),
+              let card = history.cards[history.selectedIndex].selectingAnchor(.sound) else { return nil }
+        var next = state
+        var histories = next.soundHistories ?? [:]
+        histories[word.lowercased()] = history
+        next.soundHistories = histories
+        next.cards[word.lowercased()] = card
+        try persist(next)
+        state = next
+        return card
+    }
+
     public func save(_ card: MemoryCard, replacing previousCard: MemoryCard? = nil, reason: String? = nil) throws {
         var next = state
         let wordKey = card.word.lowercased()
@@ -64,6 +93,19 @@ public final class MemoryStore {
             var revisions = next.revisions ?? [:]
             revisions[wordKey, default: []].append(MemoryCardRevision(previousCard: previousCard, reason: reason))
             next.revisions = revisions
+            if card.anchor?.kind == .sound {
+                var history = soundHistory(for: card.word)
+                history.cards.append(card)
+                history.selectedIndex = history.cards.count - 1
+                var histories = next.soundHistories ?? [:]
+                histories[wordKey] = history
+                next.soundHistories = histories
+            }
+        } else if var history = next.soundHistories?[wordKey], history.cards.indices.contains(history.selectedIndex),
+                  let selectedSound = card.selectingAnchor(.sound) {
+            // Switching to an already prepared illustration must not destroy the redo chain.
+            history.cards[history.selectedIndex] = selectedSound
+            next.soundHistories?[wordKey] = history
         }
         next.cards[wordKey] = card
         for branch in card.branches {

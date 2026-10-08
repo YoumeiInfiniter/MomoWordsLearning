@@ -76,6 +76,24 @@ struct MemoryLinkPanelView: View {
 
     private var soundRevisionControls: some View {
         VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                Button { model.moveSoundHistory(by: -1) } label: {
+                    Label("上一条", systemImage: "chevron.left")
+                }
+                .disabled(model.isGenerating || !model.soundHistory.canMove(by: -1))
+                Spacer(minLength: 0)
+                Text("\(model.soundHistory.selectedIndex + 1) / \(model.soundHistory.cards.count)")
+                    .foregroundStyle(.white.opacity(0.5))
+                    .monospacedDigit()
+                    .accessibilityLabel("第\(model.soundHistory.selectedIndex + 1)条，共\(model.soundHistory.cards.count)条")
+                Spacer(minLength: 0)
+                Button { model.moveSoundHistory(by: 1) } label: {
+                    Label("下一条", systemImage: "chevron.right")
+                }
+                .disabled(model.isGenerating || !model.soundHistory.canMove(by: 1))
+            }
+            .font(.custom("Songti SC", size: 12))
+            .buttonStyle(.plain)
             TextField("哪里不合适？可不填，例如：太牵强、没连到意思", text: $model.learnerNote)
                 .font(.custom("Songti SC", size: 12))
                 .textFieldStyle(.plain)

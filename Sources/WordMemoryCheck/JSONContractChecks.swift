@@ -18,6 +18,9 @@ enum JSONContractChecks {
                 try require((body["max_tokens"] as? Int ?? 0) >= 4096, "没有给完整 JSON 留足输出空间")
             }
             let properties = MemoryResponseContract.schema(for: request)["properties"] as! [String: Any]
+            for name in ["branches", "methods"] {
+                try require((properties[name] as? [String: Any])?["maxItems"] as? Int == 1, "输出契约仍允许冗余语境或记法")
+            }
             let anchor = properties["anchor"] as! [String: Any]
             let anchorFields = anchor["properties"] as! [String: Any]
             try require((anchorFields["kind"] as? [String: Any])?["enum"] as? [String] == [kind.rawValue], "契约没有锁定用户选择")
@@ -54,6 +57,7 @@ enum JSONContractChecks {
         object["anchor"] = anchor
         try reject(String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self), word: "state", contains: "anchor.kind")
         try reject(json, word: "claim", contains: "单词")
+        try verifyCompleteFieldClosure(json: json, card: card)
 
         var stream = ChatCompletionStreamAccumulator()
         try stream.append(#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null}}]}"#)
@@ -105,6 +109,35 @@ enum JSONContractChecks {
         }
         try require(streamed == card && FixtureProtocol.requestCount == 1, "流式生成没有使用单次请求还原卡片")
         try require(await hints.count == 1, "JSON 模式破坏了首条线索展示")
+        var completeObject = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+        completeObject["caveat"] = NSNull()
+        var completeAnchor = completeObject["anchor"] as! [String: Any]
+        completeAnchor["imagePrompt"] = NSNull()
+        completeObject["anchor"] = completeAnchor
+        let completeJSON = String(decoding: try JSONSerialization.data(withJSONObject: completeObject, options: .sortedKeys), as: UTF8.self)
+        FixtureProtocol.configure(body: try streamWire(String(completeJSON.dropLast()), finish: "stop", done: true), status: 200, mime: "text/event-stream")
+        try require(try await client.generateStreaming(request, configuration: configuration) { _ in } == card,
+                    "全部内容已收到但缺结尾括号时未本地恢复")
+        try require(FixtureProtocol.requestCount == 1, "本地括号恢复产生了追加请求")
+        // Missing content still fails, and the UI now distinguishes service stop from EOF.
+        for finish in [nil, "stop", "length"] as [String?] {
+            FixtureProtocol.configure(body: try streamWire("{\"word\":\"state\"", finish: finish, done: finish != nil), status: 200, mime: "text/event-stream")
+            do {
+                _ = try await client.generateStreaming(request, configuration: configuration) { _ in }
+                throw Failure(message: "真正缺少字段的响应被保存")
+            } catch MemoryHarnessError.invalidResponse(let reason) {
+                let expected = finish == nil ? "响应流提前结束" : (finish == "length" ? "长度上限" : "服务结束原因：stop")
+                try require(reason.contains(expected), "不完整响应未区分流中断、服务结束和长度截断")
+            }
+            try require(FixtureProtocol.requestCount == 1, "不完整响应触发了自动付费重试")
+        }
+        FixtureProtocol.configure(body: try streamWire(String(completeJSON.dropLast()), finish: "length", done: true), status: 200, mime: "text/event-stream")
+        do {
+            _ = try await client.generateStreaming(request, configuration: configuration) { _ in }
+            throw Failure(message: "明确长度截断的响应仍被恢复")
+        } catch MemoryHarnessError.invalidResponse(let reason) {
+            try require(reason.contains("长度上限"), "长度结束标志被忽略")
+        }
         FixtureProtocol.configure(body: try envelope(json), status: 200)
         let nonStreamingFallback = try await client.generateStreaming(request, configuration: configuration) { _ in }
         try require(nonStreamingFallback == card && FixtureProtocol.requestCount == 1, "同步返回的兼容处理再次发起了请求")
@@ -153,6 +186,71 @@ enum JSONContractChecks {
             let disabledBody = try JSONSerialization.data(withJSONObject: requestBodies[1], options: .sortedKeys)
             try require(enabledBody == disabledBody, "切换思考模式改变了模型、提示词或生成约束")
         }
+    }
+
+    private static func verifyCompleteFieldClosure(json: String, card: MemoryCard) throws {
+        var object = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+        object["caveat"] = NSNull()
+        var anchor = object["anchor"] as! [String: Any]
+        anchor["imagePrompt"] = NSNull()
+        object["anchor"] = anchor
+        let complete = String(decoding: try JSONSerialization.data(withJSONObject: object, options: .sortedKeys), as: UTF8.self)
+        try require(try MemoryHarness.parse(String(complete.dropLast()), expectedWord: "state", requiredAnchorKind: .sound) == card,
+                    "只缺根括号时恢复失败或改变了内容")
+        var head = object
+        let transfer = head.removeValue(forKey: "transferCheck")!
+        let headJSON = String(decoding: try JSONSerialization.data(withJSONObject: head, options: .sortedKeys), as: UTF8.self)
+        let transferJSON = String(decoding: try JSONSerialization.data(withJSONObject: transfer, options: .sortedKeys), as: UTF8.self)
+        let nested = String(headJSON.dropLast()) + ",\"transferCheck\":" + String(transferJSON.dropLast())
+        try require(try MemoryHarness.parse(nested, expectedWord: "state") == card, "仅缺多层结尾括号未安全恢复")
+        try reject(nested + ",", word: "state", contains: "未完整返回")
+        try reject(String(complete.dropLast(2)), word: "state", contains: "未完整返回")
+        try reject("[" + String(complete.dropLast()), word: "state", contains: "数组")
+        for key in ["coreConcept", "caveat", "transferCheck"] {
+            var missing = object
+            missing.removeValue(forKey: key)
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: missing, options: .sortedKeys), as: UTF8.self)
+            try reject(String(text.dropLast()), word: "state", contains: "未完整返回")
+        }
+        var wrongTarget = object
+        var transferFields = wrongTarget["transferCheck"] as! [String: Any]
+        transferFields["targetBranch"] = "does-not-exist"
+        wrongTarget["transferCheck"] = transferFields
+        let wrongTargetJSON = String(decoding: try JSONSerialization.data(withJSONObject: wrongTarget), as: UTF8.self)
+        try reject(String(wrongTargetJSON.dropLast()), word: "state", contains: "新句与义项")
+        var partialBranch = object
+        var branchFields = (partialBranch["branches"] as! [[String: Any]])[0]
+        branchFields.removeValue(forKey: "explanation")
+        partialBranch["branches"] = [branchFields]
+        let partialBranchJSON = String(decoding: try JSONSerialization.data(withJSONObject: partialBranch), as: UTF8.self)
+        try reject(String(partialBranchJSON.dropLast()), word: "state", contains: "未完整返回")
+        var escapedObject = object
+        var escapedAnchor = escapedObject["anchor"] as! [String: Any]
+        let escapedCue = "引号\"、括号 {x} ]、反斜杠\\"
+        escapedAnchor["cue"] = escapedCue
+        escapedObject["anchor"] = escapedAnchor
+        let escapedJSON = String(decoding: try JSONSerialization.data(withJSONObject: escapedObject), as: UTF8.self)
+        try require(try MemoryHarness.parse(String(escapedJSON.dropLast()), expectedWord: "state").anchor?.cue == escapedCue,
+                    "结尾恢复改变了字符串内容")
+        anchor.removeValue(forKey: "imagePrompt")
+        object["anchor"] = anchor
+        let missingNullable = String(decoding: try JSONSerialization.data(withJSONObject: object, options: .sortedKeys), as: UTF8.self)
+        try reject(String(missingNullable.dropLast()), word: "state", contains: "未完整返回")
+    }
+
+    private static func streamWire(_ text: String, finish: String?, done: Bool) throws -> Data {
+        let split = text.count / 2
+        var wire = ""
+        for piece in [String(text.prefix(split)), String(text.dropFirst(split))] {
+            let payload = try JSONSerialization.data(withJSONObject: ["choices": [["index": 0, "delta": ["content": piece]]]])
+            wire += "data: \(String(decoding: payload, as: UTF8.self))\r\n\r\n"
+        }
+        if let finish {
+            let payload = try JSONSerialization.data(withJSONObject: ["choices": [["index": 0, "delta": [:], "finish_reason": finish]]])
+            wire += "data: \(String(decoding: payload, as: UTF8.self))\n\n"
+        }
+        if done { wire += "data: [DONE]\n\n" }
+        return Data(wire.utf8)
     }
 
     private static func envelope(_ text: String) throws -> Data {

@@ -4,10 +4,15 @@ import Foundation
 public struct ChatCompletionStreamAccumulator: Sendable {
     public private(set) var content = ""
     public private(set) var isDone = false
-    private var finishReason: String?
+    public private(set) var finishReason: String?
     private var wasRefused = false
 
     public init() {}
+
+    public var terminationDescription: String {
+        if let finishReason { return "服务结束原因：\(finishReason)" }
+        return isDone ? "收到 DONE，但没有结束原因" : "响应流提前结束，未收到结束原因或 DONE"
+    }
 
     public mutating func append(_ payload: String) throws {
         if payload.trimmingCharacters(in: .whitespacesAndNewlines) == "[DONE]" { isDone = true; return }

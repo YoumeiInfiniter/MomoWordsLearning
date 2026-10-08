@@ -155,7 +155,11 @@ public struct OpenAICompatibleClient: Sendable {
         let content = accumulator.content.isEmpty && isJSONEnvelope
             ? try ChatCompletionResponse.content(from: rawResponse)
             : try accumulator.completedContent()
-        return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.preferredAnchorKind)
+        do {
+            return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.preferredAnchorKind)
+        } catch MemoryHarnessError.invalidResponse(let reason) where reason.contains("JSON 对象未完整返回") && !accumulator.content.isEmpty {
+            throw MemoryHarnessError.invalidResponse("\(reason)；\(accumulator.terminationDescription)；已接收 \(content.utf8.count) 字节，未自动重试")
+        }
     }
 
     public func generate(_ request: MemoryRequest, configuration: ModelConfiguration) async throws -> MemoryCard {

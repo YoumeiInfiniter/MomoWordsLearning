@@ -19,7 +19,7 @@ struct WordMemoryCheck {
         try verifyImageStorage()
         try verifyMaiziImageResponse()
         try await JSONContractChecks.run(card: sampleCard())
-        print("word-memory-check: 通过历史导航与持久选择、联想重做、可选原因、旧卡归档、失败保护、思考开关、JSON、单次请求与存储检查")
+        print("word-memory-check: 通过 JSON 结尾安全恢复与中断诊断、历史导航与持久选择、联想重做、可选原因、旧卡归档、失败保护、思考开关、单次请求与存储检查")
     }
 
     private static func validateSSEFraming() throws {

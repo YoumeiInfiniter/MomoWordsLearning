@@ -35,8 +35,13 @@ public struct MemoryImageStore: Sendable {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
+    public func imageURL(cacheKey: String) -> URL? {
+        let url = directoryURL.appendingPathComponent(MemoryIdentity.digest(cacheKey) + ".png")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     @discardableResult
-    public func save(_ imageData: Data, for word: String, prompt: String) throws -> URL {
+    public func save(_ imageData: Data, for word: String, prompt: String, cacheKey: String? = nil) throws -> URL {
         guard imageData.count <= 20 * 1_024 * 1_024 else { throw ImageError.imageTooLarge }
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -53,7 +58,7 @@ public struct MemoryImageStore: Sendable {
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw ImageError.invalidImage }
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-        let url = fileURL(for: word, prompt: prompt)
+        let url = cacheKey.map { directoryURL.appendingPathComponent(MemoryIdentity.digest($0) + ".png") } ?? fileURL(for: word, prompt: prompt)
         try (png as Data).write(to: url, options: .atomic)
         return url
     }

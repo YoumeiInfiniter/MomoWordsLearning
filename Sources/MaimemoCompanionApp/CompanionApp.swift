@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import MaimemoAXCore
 import WordMemoryCore
@@ -10,16 +11,17 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var lastChangeAt: Date?
     @Published private(set) var memoryCard: MemoryCard?
     @Published private(set) var memoryImageURL: URL?
-    @Published private(set) var imageGeneratingWord: String?
     @Published var imageError: String?
     @Published private(set) var isMemoryRevealed = false
     @Published private(set) var selectedAnchorKind: MemoryAnchorKind = .sound
     @Published private(set) var isShowingLastCapturedWord = false
     @Published private(set) var selectedBranchID: String?
     @Published private(set) var quickHint: QuickMemoryHint?
-    @Published private(set) var generatingWord: String?
     @Published var memoryError: String?
     @Published var learnerNote = ""
+    @Published var reasonTags: Set<RevisionReasonTag> = []
+    @Published var showImageTasks = false
+    @Published var needsBranchSelection = false
     @Published var selectedMethodKind: MemoryMethodKind? = nil
     @Published var showAnswer = false
     @Published var showSettings = false
@@ -48,30 +50,38 @@ final class CompanionViewModel: ObservableObject {
     private let injectedImageGenerator: (any MemoryImageGenerator)?
     private var previousWord: String?
     private var lastScanSnapshot: MaimemoAXSnapshot
-    private let modelClient = OpenAICompatibleClient()
+    private let modelClient: OpenAICompatibleClient
+    private let injectedModelConfiguration: ModelConfiguration?
+    private var selectedBranchWasExplicit = false
     private var quickHints: [String: QuickMemoryHint] = [:]
-    private var generationTask: Task<Void, Never>?
-    private var activeGenerationID: UUID?
-    private var generatingAnchorKind: MemoryAnchorKind?
-    private var imageSelectionIntent: String?
-    private var imageGenerationTask: Task<Void, Never>?
-    private var activeImageGenerationID: UUID?
+    @Published private var activeGenerations: [String: UUID] = [:]
+    private var generationTasks: [String: Task<Void, Never>] = [:]
+    private var generationErrors: [String: String] = [:]
+    let imageTasks: ImageTaskManager
+    private var taskObservation: AnyCancellable?
 
-    var isGenerating: Bool { generatingWord == snapshot.word && generatingWord != nil }
-    var isGeneratingCurrentImage: Bool { imageGeneratingWord == snapshot.word && imageGeneratingWord != nil }
+    var isGenerating: Bool { snapshot.word.map { activeGenerations[$0.lowercased()] != nil } ?? false }
+    var currentImageIdentity: ImageTaskIdentity? {
+        memoryCard.map { ImageTaskIdentity(word: $0.word, versionID: $0.versionKey, prompt: $0.illustrationPrompt) }
+    }
+    var currentImageTask: ImageTaskRecord? { currentImageIdentity.flatMap { imageTasks.task(for: $0) } }
+    var isGeneratingCurrentImage: Bool { currentImageTask?.state.isActive == true }
     var imageGenerator: (any MemoryImageGenerator)? {
         injectedImageGenerator ?? (hasStoredImageAPIKey ? MaiziImageGenerator() : nil)
     }
 
-    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore(), imageStore: MemoryImageStore = MemoryImageStore(), imageGenerator: (any MemoryImageGenerator)? = nil) {
+    init(reader: MaimemoAccessibilityReader = MaimemoAccessibilityReader(), memoryStore: MemoryStore = MemoryStore(), imageStore: MemoryImageStore = MemoryImageStore(), imageGenerator: (any MemoryImageGenerator)? = nil, modelClient: OpenAICompatibleClient = OpenAICompatibleClient(), modelConfiguration: ModelConfiguration? = nil, checkStoredKeys: Bool = true) {
+        self.modelClient = modelClient
+        self.injectedModelConfiguration = modelConfiguration
         self.reader = reader
         self.memoryStore = memoryStore
         self.imageStore = imageStore
+        self.imageTasks = ImageTaskManager(imageStore: imageStore)
         self.injectedImageGenerator = imageGenerator
-        self.endpointText = UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
-        self.modelText = UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
+        self.endpointText = modelConfiguration?.endpoint.absoluteString ?? UserDefaults.standard.string(forKey: "memory.model.endpoint") ?? ""
+        self.modelText = modelConfiguration?.model ?? UserDefaults.standard.string(forKey: "memory.model.name") ?? ""
         self.thinkingEnabled = UserDefaults.standard.object(forKey: "memory.model.thinkingEnabled") as? Bool ?? true
-        self.hasStoredAPIKey = false
+        self.hasStoredAPIKey = modelConfiguration != nil
         self.memoryError = memoryStore.loadWarning
         let initialSnapshot = MaimemoAXSnapshot(
             appFound: false,
@@ -87,6 +97,14 @@ final class CompanionViewModel: ObservableObject {
         self.snapshot = initialSnapshot
         self.diagnosticSnapshot = initialSnapshot
         self.lastScanSnapshot = initialSnapshot
+        taskObservation = imageTasks.$records.sink { [weak self] _ in
+            // Published values arrive before assignment; redraw from the completed update.
+            Task { @MainActor [weak self] in self?.refreshImageState() }
+        }
+        guard checkStoredKeys else {
+            isCheckingStoredAPIKey = false; isCheckingImageAPIKey = false
+            return
+        }
         Task { [weak self] in
             let exists = await Task.detached(priority: .utility) {
                 ModelSecretStore.exists()
@@ -108,6 +126,11 @@ final class CompanionViewModel: ObservableObject {
 
     func refresh() async -> MaimemoAXSnapshot {
         let next = await reader.scanAsync()
+        return applySnapshot(next)
+    }
+
+    @discardableResult
+    func applySnapshot(_ next: MaimemoAXSnapshot) -> MaimemoAXSnapshot {
         lastScanSnapshot = next
         // A partial AX traversal is not proof that the displayed word disappeared.
         // Keep the last complete result until a complete scan or app/permission change.
@@ -118,11 +141,6 @@ final class CompanionViewModel: ObservableObject {
         }
         isShowingLastCapturedWord = false
         if next.word != previousWord, next.word != nil {
-            imageSelectionIntent = nil
-            imageGenerationTask?.cancel()
-            imageGenerationTask = nil
-            activeImageGenerationID = nil
-            imageGeneratingWord = nil
             lastChangeAt = Date()
             isMemoryRevealed = false
             selectedMethodKind = nil
@@ -136,17 +154,14 @@ final class CompanionViewModel: ObservableObject {
                 selectedBranchID = memoryCard?.branches.first?.id
                 showAnswer = false
                 learnerNote = ""
+                reasonTags = []; needsBranchSelection = false
+                selectedBranchWasExplicit = false
                 if memoryCard != nil {
                     do { try memoryStore.recordEncounter(word: word) }
                     catch { memoryError = "本地记录更新失败：\(error.localizedDescription)" }
                 }
             }
         } else if next.word == nil, previousWord != nil {
-            imageSelectionIntent = nil
-            imageGenerationTask?.cancel()
-            imageGenerationTask = nil
-            activeImageGenerationID = nil
-            imageGeneratingWord = nil
             memoryCard = nil
             selectedAnchorKind = .sound
             memoryImageURL = nil
@@ -156,7 +171,9 @@ final class CompanionViewModel: ObservableObject {
             isMemoryRevealed = false
             selectedMethodKind = nil
             learnerNote = ""
+            reasonTags = []; needsBranchSelection = false
         }
+        if next.word != previousWord { memoryError = next.word.flatMap { generationErrors[$0.lowercased()] } ?? memoryStore.loadWarning }
         previousWord = next.word
         if next.word != snapshot.word || next.appFound != snapshot.appFound || next.isTrusted != snapshot.isTrusted {
             snapshot = next
@@ -188,6 +205,8 @@ final class CompanionViewModel: ObservableObject {
         generateRevealedCardIfNeeded()
     }
 
+    func collapseMemoryHelp() { isMemoryRevealed = false; showAnswer = false }
+
     func returnToLearning() {
         showSettings = false
         generateRevealedCardIfNeeded()
@@ -195,78 +214,51 @@ final class CompanionViewModel: ObservableObject {
 
     private func generateRevealedCardIfNeeded() {
         guard snapshot.word != nil, isMemoryRevealed, !showSettings,
+              memoryStore.loadWarning == nil, generationErrors[snapshot.word!.lowercased()] == nil,
               memoryCard == nil, quickHint == nil, !isGenerating, modelIsConfigured else { return }
         generateMemoryCard()
     }
 
-    func chooseAnchor(_ kind: MemoryAnchorKind) {
-        guard isMemoryRevealed, let word = snapshot.word else { return }
-        if selectedAnchorKind != kind { learnerNote = "" }
-        selectedAnchorKind = kind
-        imageError = nil
-        imageSelectionIntent = kind == .letterIllustration ? word : nil
+    func chooseAnchor(_ kind: MemoryAnchorKind, generateImage: Bool = true) {
+        guard isMemoryRevealed, !isGenerating else { return }
         if let card = memoryCard, let selected = card.selectingAnchor(kind) {
-            if generatingWord == word {
-                generationTask?.cancel()
-                generationTask = nil
-                activeGenerationID = nil
-                generatingWord = nil
-                generatingAnchorKind = nil
-                quickHint = nil
-                quickHints.removeValue(forKey: word.lowercased())
-            }
             do {
-                if card.anchor?.kind != kind { try memoryStore.save(selected) }
-                memoryCard = selected
-                memoryImageURL = imageURL(for: selected)
-                if kind == .letterIllustration {
-                    imageSelectionIntent = nil
-                    generateImageIfNeeded(for: selected)
-                }
-            } catch {
-                imageSelectionIntent = nil
-                memoryError = "联想方式保存失败：\(error.localizedDescription)"
-            }
+                try memoryStore.save(selected)
+                memoryCard = selected; selectedAnchorKind = kind
+                learnerNote = ""; reasonTags = []
+                refreshImageState()
+                if kind == .letterIllustration && generateImage { generateCurrentIllustration() }
+            } catch { memoryError = error.localizedDescription }
         } else {
             generateMemoryCard(requestedAnchorKind: kind, switchingAnchor: memoryCard != nil)
         }
     }
 
-    func retrySelectedAnchor() {
-        guard isMemoryRevealed, let word = snapshot.word else { return }
-        imageSelectionIntent = selectedAnchorKind == .letterIllustration ? word : nil
-        generateMemoryCard(requestedAnchorKind: selectedAnchorKind, switchingAnchor: memoryCard != nil)
-    }
+    func retrySelectedAnchor() { generateMemoryCard() }
 
-    func regenerateSoundAnchor() {
-        guard isMemoryRevealed, selectedAnchorKind == .sound, !isGenerating,
-              memoryCard?.anchor(for: .sound) != nil else { return }
-        imageSelectionIntent = nil
-        generateMemoryCard(requestedAnchorKind: .sound, isAnchorRevision: true)
-    }
-
-    var soundHistory: SoundAnchorHistory {
-        guard let word = snapshot.word else { return SoundAnchorHistory(cards: [], selectedIndex: 0) }
-        return memoryStore.soundHistory(for: word)
-    }
-
-    func moveSoundHistory(by offset: Int) {
-        guard isMemoryRevealed, selectedAnchorKind == .sound, !isGenerating,
-              let word = snapshot.word else { return }
-        do {
-            guard let card = try memoryStore.moveSoundHistory(for: word, by: offset) else { return }
-            memoryCard = card
-            memoryImageURL = nil
-            quickHint = nil
-            quickHints.removeValue(forKey: word.lowercased())
-            learnerNote = ""
-            memoryError = nil
-            selectedBranchID = card.branches.first?.id
-            showAnswer = false
-            imageSelectionIntent = nil
-        } catch {
-            memoryError = "历史联想切换失败：\(error.localizedDescription)"
+    func regenerate(_ preset: MemoryPreset) {
+        guard isMemoryRevealed, memoryCard != nil, !isGenerating else { return }
+        if let conflict = preset.conflict(with: learnerNote) { memoryError = conflict; return }
+        if preset == .focusBranch, selectedBranch == nil || (memoryCard!.branches.count > 1 && !selectedBranchWasExplicit) {
+            needsBranchSelection = true; return
         }
+        generateMemoryCard(preset: preset)
+    }
+
+    var cardHistory: SoundAnchorHistory {
+        snapshot.word.map { memoryStore.history(for: $0) } ?? SoundAnchorHistory(cards: [], selectedIndex: 0)
+    }
+
+    func moveHistory(by offset: Int) {
+        guard isMemoryRevealed, !isGenerating, let word = snapshot.word else { return }
+        do {
+            guard let card = try memoryStore.moveHistory(for: word, by: offset) else { return }
+            memoryCard = card; selectedAnchorKind = card.anchor?.kind ?? .context
+            quickHint = nil; quickHints.removeValue(forKey: word.lowercased())
+            learnerNote = ""; reasonTags = []; memoryError = nil; selectedBranchWasExplicit = false
+            selectedBranchID = card.branches.first?.id; showAnswer = false
+            refreshImageState()
+        } catch { memoryError = "历史切换失败：\(error.localizedDescription)" }
     }
 
     func saveModelSettings() {
@@ -331,164 +323,120 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
-    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false, isAnchorRevision: Bool = false) {
-        guard let word = snapshot.word else { return }
-        let anchorKind = requestedAnchorKind ?? selectedAnchorKind
-        if generatingWord == word && generatingAnchorKind == anchorKind { return }
+    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false, preset: MemoryPreset? = nil) {
+        guard let word = snapshot.word, !isGenerating else { return }
+        let wordKey = word.lowercased()
         let modelName = modelText
-        // Capture the choice now, before waiting for Keychain; in-flight work keeps its mode.
         let requestThinkingEnabled = thinkingEnabled
-        guard let url = URL(string: endpointText), !modelName.isEmpty else {
-            openSettings()
-            settingsMessage = MemoryHarnessError.notConfigured.localizedDescription
-            return
+        guard let endpoint = URL(string: endpointText), !modelName.isEmpty else {
+            openSettings(); settingsMessage = MemoryHarnessError.notConfigured.localizedDescription; return
         }
+        let original = memoryCard
+        let expectedStoredCard = memoryStore.card(for: word)
+        let focused = preset == .focusBranch ? selectedBranch : nil
         let previous = branchHistory
-        let baseRequest = MemoryRequest(
-            word: word,
-            learnerNote: learnerNote,
-            previousReason: previous?.forgetReason,
-            preferredMethod: selectedMethodKind,
-            previousMethod: previous?.methodVersions.last?.method.cue,
-            existingCard: memoryCard,
-            focusMeaningKey: switchingAnchor ? nil : selectedBranch?.meaningKey,
-            preferredAnchorKind: anchorKind
-        )
-        let request = if isAnchorRevision, let card = memoryCard {
-            MemoryRequest.revisingSound(card, reason: learnerNote)
-        } else { baseRequest }
-        let existingCard = switchingAnchor || isAnchorRevision ? memoryCard : nil
-        if let oldWord = generatingWord {
-            generationTask?.cancel()
-            quickHints.removeValue(forKey: oldWord.lowercased())
-            activeGenerationID = nil
-        }
-        let generationID = UUID()
-        activeGenerationID = generationID
-        generatingWord = word
-        generatingAnchorKind = anchorKind
-        quickHint = nil
-        memoryError = nil
-        generationTask = Task { [weak self] in
+        let request = MemoryRequest(word: word, learnerNote: learnerNote,
+            previousReason: previous?.forgetReason, preferredMethod: selectedMethodKind,
+            previousMethod: previous?.methodVersions.last?.method.cue, existingCard: original,
+            focusMeaningKey: switchingAnchor ? nil : (focused?.meaningKey ?? selectedBranch?.meaningKey),
+            preferredAnchorKind: requestedAnchorKind ?? .sound, isAnchorRevision: original != nil,
+            strategy: requestedAnchorKind == nil ? (preset?.strategy ?? .auto) : nil,
+            preset: preset, reasonTags: RevisionReasonTag.allCases.filter { reasonTags.contains($0) },
+            visibleContext: nil, focusBranchID: focused?.id, previousUserNote: previous?.userNote ?? "")
+        let generationID = request.requestID
+        activeGenerations[wordKey] = generationID
+        quickHint = nil; memoryError = nil; generationErrors.removeValue(forKey: wordKey)
+        // Image choice authorizes one generation after the full text prompt passes validation.
+        let wantsImage = requestedAnchorKind == .letterIllustration
+        generationTasks[wordKey] = Task { [weak self] in
             guard let self else { return }
-            do {
-                guard let key = await Task.detached(priority: .userInitiated, operation: {
-                    ModelSecretStore.load()
-                }).value else {
-                    if activeGenerationID == generationID && snapshot.word == word {
-                        openSettings()
-                        settingsMessage = MemoryHarnessError.notConfigured.localizedDescription
-                    }
-                    finishGeneration(generationID)
-                    return
+            defer {
+                if activeGenerations[wordKey] == generationID {
+                    activeGenerations.removeValue(forKey: wordKey); generationTasks.removeValue(forKey: wordKey)
                 }
-                try Task.checkCancellation()
-                guard activeGenerationID == generationID else { return }
-                let configuration = ModelConfiguration(endpoint: url, model: modelName, apiKey: key,
-                                                       thinkingEnabled: requestThinkingEnabled)
+            }
+            do {
+                let capturedKey: String?
+                if let injectedModelConfiguration { capturedKey = injectedModelConfiguration.apiKey }
+                else { capturedKey = await Task.detached(priority: .userInitiated, operation: { ModelSecretStore.load() }).value }
+                guard let key = capturedKey else {
+                    throw MemoryHarnessError.notConfigured
+                }
+                let configuration = ModelConfiguration(endpoint: endpoint, model: modelName, apiKey: key, thinkingEnabled: requestThinkingEnabled)
                 let generated = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
                     await self?.receiveQuickHint(hint, generationID: generationID)
                 }
                 try Task.checkCancellation()
-                guard activeGenerationID == generationID else { return }
-                let card = if let existingCard {
-                    generated.withAlternateAnchor(existingCard.anchor(for: anchorKind == .sound ? .letterIllustration : .sound))
-                } else {
-                    generated
+                guard activeGenerations[wordKey] == generationID,
+                      memoryStore.card(for: word) == expectedStoredCard else { throw MemoryStore.StoreError.staleRevision }
+                let card = original.map { generated.preservingAnchors(from: $0) } ?? generated
+                var safeEndpoint = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+                safeEndpoint?.query = nil; safeEndpoint?.user = nil; safeEndpoint?.password = nil
+                let record = MemoryRedoRecord(request: request, card: card, model: modelName, endpoint: safeEndpoint?.string ?? endpoint.host ?? "", thinkingEnabled: requestThinkingEnabled)
+                try memoryStore.save(card, replacing: original, reason: request.learnerNote, redoRecord: record)
+                quickHints.removeValue(forKey: wordKey)
+                // Save to the captured word first. Visibility is independent of completion.
+                if snapshot.word == word {
+                    memoryCard = card; selectedAnchorKind = card.anchor?.kind ?? .context
+                    quickHint = nil; selectedBranchID = focused?.id ?? card.branches.first?.id
+                    showAnswer = false; learnerNote = ""; reasonTags = []
+                    refreshImageState()
                 }
-                try memoryStore.save(card, replacing: isAnchorRevision ? existingCard : nil,
-                                     reason: isAnchorRevision ? request.learnerNote : nil)
-                quickHints.removeValue(forKey: word.lowercased())
-                if snapshot.word == word && selectedAnchorKind == anchorKind {
-                    memoryCard = card
-                    memoryImageURL = imageURL(for: card)
-                    quickHint = nil
-                    selectedBranchID = card.branches.first?.id
-                    showAnswer = false
-                    if isAnchorRevision { learnerNote = "" }
-                    if anchorKind == .letterIllustration && imageSelectionIntent == word {
-                        imageSelectionIntent = nil
-                        generateImageIfNeeded(for: card)
-                    }
-                }
+                if wantsImage { enqueueIllustration(for: card) }
             } catch {
-                if activeGenerationID == generationID && !Task.isCancelled {
-                    if isAnchorRevision {
-                        quickHints.removeValue(forKey: word.lowercased())
-                    }
-                    if snapshot.word == word {
-                        if isAnchorRevision { quickHint = nil }
-                        memoryError = error.localizedDescription
-                    }
+                if !Task.isCancelled {
+                    generationErrors[wordKey] = error.localizedDescription
+                    if snapshot.word == word { memoryError = error.localizedDescription }
                 }
             }
-            finishGeneration(generationID)
         }
     }
 
     private func receiveQuickHint(_ hint: QuickMemoryHint, generationID: UUID) {
-        guard activeGenerationID == generationID, !Task.isCancelled else { return }
+        guard activeGenerations[hint.word.lowercased()] == generationID else { return }
         quickHints[hint.word.lowercased()] = hint
-        if snapshot.word?.caseInsensitiveCompare(hint.word) == .orderedSame {
-            quickHint = hint
-        }
-    }
-
-    private func finishGeneration(_ generationID: UUID) {
-        guard activeGenerationID == generationID else { return }
-        activeGenerationID = nil
-        generatingWord = nil
-        generatingAnchorKind = nil
-        generationTask = nil
+        if snapshot.word == hint.word { quickHint = hint }
     }
 
     private func imageURL(for card: MemoryCard) -> URL? {
-        guard card.anchor?.kind == .letterIllustration,
-              let prompt = card.anchor?.imagePrompt else { return nil }
-        return imageStore.imageURL(for: card.word, prompt: prompt)
+        let identity = ImageTaskIdentity(word: card.word, versionID: card.versionKey, prompt: card.illustrationPrompt)
+        return imageTasks.imageURL(for: identity, prompt: card.illustrationPrompt)
     }
 
-    private func generateImageIfNeeded(for card: MemoryCard) {
-        guard isMemoryRevealed, snapshot.word == card.word,
-              card.anchor?.kind == .letterIllustration,
-              let prompt = card.anchor?.imagePrompt,
-              let imageGenerator,
-              imageStore.imageURL(for: card.word, prompt: prompt) == nil else { return }
-        if imageGeneratingWord == card.word { return }
-        imageGenerationTask?.cancel()
-        let generationID = UUID()
-        activeImageGenerationID = generationID
-        imageGeneratingWord = card.word
-        imageError = nil
-        let imageStore = self.imageStore
-        imageGenerationTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let image = try await imageGenerator.generateImage(prompt: prompt)
-                try Task.checkCancellation()
-                guard activeImageGenerationID == generationID else { return }
-                let url = try await Task.detached(priority: .utility) {
-                    try imageStore.save(image, for: card.word, prompt: prompt)
-                }.value
-                try Task.checkCancellation()
-                if activeImageGenerationID == generationID && snapshot.word == card.word {
-                    memoryImageURL = url
-                }
-            } catch {
-                if activeImageGenerationID == generationID && !Task.isCancelled && snapshot.word == card.word {
-                    imageError = error.localizedDescription
-                }
-            }
-            if activeImageGenerationID == generationID {
-                activeImageGenerationID = nil
-                imageGeneratingWord = nil
-                imageGenerationTask = nil
-            }
-        }
+    private func refreshImageState() {
+        memoryImageURL = memoryCard.flatMap { imageURL(for: $0) }
+        imageError = currentImageTask?.failure?.message ?? imageTasks.storageWarning
+        objectWillChange.send()
+    }
+
+    func generateCurrentIllustration(newGeneration: Bool = false) {
+        guard isMemoryRevealed, let card = memoryCard else { return }
+        enqueueIllustration(for: card, newGeneration: newGeneration)
+    }
+
+    private func enqueueIllustration(for card: MemoryCard, newGeneration: Bool = false) {
+        guard let generator = imageGenerator else { imageError = MaiziImageError.notConfigured.localizedDescription; return }
+        do {
+            let identity = ImageTaskIdentity(word: card.word, versionID: card.versionKey, prompt: card.illustrationPrompt)
+            try imageTasks.enqueue(identity: identity, prompt: card.illustrationPrompt, generator: generator, newGeneration: newGeneration)
+            refreshImageState()
+        } catch { imageError = error.localizedDescription }
+    }
+
+    func resumeImageResult(_ record: ImageTaskRecord) {
+        let generator = imageGenerator ?? MaiziImageGenerator()
+        do { try imageTasks.resumeResult(id: record.id, generator: generator); refreshImageState() }
+        catch { imageError = error.localizedDescription }
+    }
+
+    func cancelImageTask(_ record: ImageTaskRecord) {
+        do { try imageTasks.cancel(id: record.id); refreshImageState() }
+        catch { imageError = error.localizedDescription }
     }
 
     func selectBranch(_ branch: MeaningBranch) {
         selectedBranchID = branch.id
+        selectedBranchWasExplicit = true; needsBranchSelection = false
         showAnswer = false
     }
 
@@ -581,6 +529,9 @@ struct SidebarView: View {
         }
         .frame(minWidth: 320, idealWidth: 410, maxWidth: 580, minHeight: 300)
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $model.showImageTasks) {
+            ImageTaskListView(model: model, tasks: model.imageTasks)
+        }
     }
 
     private func revealSurface(minHeight: CGFloat) -> some View {
@@ -614,6 +565,18 @@ struct SidebarView: View {
                 .frame(width: 6, height: 6)
                 .accessibilityHidden(true)
             Spacer()
+            if model.isMemoryRevealed {
+                Button { model.collapseMemoryHelp() } label: { Image(systemName: "eye.slash") }
+                    .buttonStyle(.plain).accessibilityLabel("收起线索")
+            }
+            Button { model.showImageTasks = true } label: {
+                Image(systemName: "photo.stack")
+                    .overlay(alignment: .topTrailing) {
+                        if model.imageTasks.records.contains(where: { $0.state.isActive }) {
+                            Circle().fill(.orange).frame(width: 5, height: 5).offset(x: 5, y: -5)
+                        }
+                    }
+            }.buttonStyle(.plain).accessibilityLabel("后台插画任务")
             Button { model.openSettings() } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 15, weight: .medium))
@@ -820,12 +783,30 @@ struct SidebarView: View {
 
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
-    let model = CompanionViewModel()
+    let model: CompanionViewModel
     private var window: NSWindow?
     private var timer: Timer?
     private var scanInFlight = false
 
+    override init() {
+        #if DEBUG
+        if (CommandLine.arguments.contains("--offline-preview") || Bundle.main.bundleIdentifier == "local.maimemo.companion.preview") { model = CompanionLifecycleChecks.previewModel() }
+        else { model = CompanionViewModel() }
+        #else
+        model = CompanionViewModel()
+        #endif
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let menu = NSMenu()
+        let applicationItem = NSMenuItem(); menu.addItem(applicationItem)
+        let applicationMenu = NSMenu(); applicationItem.submenu = applicationMenu
+        let reopen = NSMenuItem(title: "显示侧栏", action: #selector(reopenWindow), keyEquivalent: "0")
+        reopen.target = self; applicationMenu.addItem(reopen)
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(NSMenuItem(title: "退出 Maimemo Companion", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        NSApp.mainMenu = menu
         let hosting = NSHostingView(rootView: SidebarView(model: model))
         let contentRect = NSRect(x: 0, y: 0, width: 410, height: 540)
         let window = NSWindow(
@@ -844,15 +825,29 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         self.window = window
 
+        #if DEBUG
+        if (CommandLine.arguments.contains("--offline-preview") || Bundle.main.bundleIdentifier == "local.maimemo.companion.preview") {
+            window.title = "Maimemo Companion · 离线界面预览"
+            window.setFrame(NSRect(x: 600, y: 100, width: 410, height: 850), display: true)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        #endif
+
         refreshAndPosition()
         timer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshAndPosition() }
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        window?.makeKeyAndOrderFront(nil)
+        return true
     }
+
+    @objc private func reopenWindow() { window?.makeKeyAndOrderFront(nil) }
 
     private func refreshAndPosition() {
         guard !scanInFlight else { return }
@@ -912,7 +907,13 @@ private extension CGRect {
 @main
 @MainActor
 struct MaimemoCompanionMain {
-    static func main() {
+    static func main() async throws {
+        #if DEBUG
+        if CommandLine.arguments.contains("--offline-check") {
+            try await CompanionLifecycleChecks.run()
+            return
+        }
+        #endif
         let application = NSApplication.shared
         let delegate = CompanionAppDelegate()
         application.delegate = delegate

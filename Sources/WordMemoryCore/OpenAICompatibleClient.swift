@@ -141,7 +141,7 @@ public struct OpenAICompatibleClient: Sendable {
                 if accumulator.isDone { break }
                 if !didEmitHint,
                        let hint = MemoryHarness.quickHint(from: accumulator.content, expectedWord: request.word),
-                       hint.anchor.kind == request.preferredAnchorKind {
+                       request.allowedAnchorKinds.contains(hint.anchor.kind) {
                     didEmitHint = true
                     await onQuickHint(hint)
                 }
@@ -156,7 +156,10 @@ public struct OpenAICompatibleClient: Sendable {
             ? try ChatCompletionResponse.content(from: rawResponse)
             : try accumulator.completedContent()
         do {
-            return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.preferredAnchorKind)
+            let card = try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.requiredAnchorKind)
+            try MemoryResponseContract.validateStructure(content, for: request)
+            try MemoryHarness.validate(card, for: request)
+            return card
         } catch MemoryHarnessError.invalidResponse(let reason) where reason.contains("JSON 对象未完整返回") && !accumulator.content.isEmpty {
             throw MemoryHarnessError.invalidResponse("\(reason)；\(accumulator.terminationDescription)；已接收 \(content.utf8.count) 字节，未自动重试")
         }
@@ -168,6 +171,9 @@ public struct OpenAICompatibleClient: Sendable {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw MemoryHarnessError.requestFailed(status) }
         let content = try ChatCompletionResponse.content(from: data)
-        return try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.preferredAnchorKind)
+        let card = try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.requiredAnchorKind)
+        try MemoryResponseContract.validateStructure(content, for: request)
+        try MemoryHarness.validate(card, for: request)
+        return card
     }
 }

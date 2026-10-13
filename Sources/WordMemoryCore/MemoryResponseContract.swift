@@ -2,59 +2,89 @@ import Foundation
 
 /// The model's wire contract. Local history-only fields never belong in a model response.
 public enum MemoryResponseContract {
+    public static func validateStructure(_ raw: String, for request: MemoryRequest) throws {
+        guard request.strategy != nil else { return }
+        let data = try normalizedData(from: raw)
+        guard let value = try? JSONSerialization.jsonObject(with: data), matchesStructure(value, schema: schema(for: request)) else {
+            throw MemoryHarnessError.invalidResponse("新版字段缺失、类型或数量不符合约定；nullable 字段也必须出现")
+        }
+    }
     public static func schema(for request: MemoryRequest) -> [String: Any] {
         let text: [String: Any] = ["type": "string", "minLength": 1]
+        let nullable: [String: Any] = ["type": ["string", "null"]]
         func object(_ properties: [String: Any]) -> [String: Any] {
             ["type": "object", "properties": properties,
              "required": properties.keys.sorted(), "additionalProperties": false]
         }
-        func array(_ item: [String: Any]) -> [String: Any] {
-            ["type": "array", "items": item, "minItems": 1, "maxItems": 1]
+        func array(_ item: [String: Any], min: Int = 1, max: Int = 1) -> [String: Any] {
+            ["type": "array", "items": item, "minItems": min, "maxItems": max]
         }
-        let imagePrompt: [String: Any] = request.preferredAnchorKind == .sound
-            ? ["type": "null"] : text
-        return object([
-            "word": ["type": "string", "enum": [request.word]],
-            "coreConcept": text,
-            "anchor": object([
-                "kind": ["type": "string", "enum": [request.preferredAnchorKind.rawValue]],
-                "cue": text, "explanation": text, "imagePrompt": imagePrompt
-            ]),
-            "branches": array(object([
-                "partOfSpeech": text, "meaningKey": text, "chineseMeaning": text,
-                "context": text, "signal": text, "explanation": text
-            ])),
+        let imagePrompt: [String: Any] = request.requiredAnchorKind == .letterIllustration ? text : ["type": "null"]
+        var fields: [String: Any] = [
+            "word": ["type": "string", "enum": [request.word]], "coreConcept": text,
+            "anchor": object(["kind": ["type": "string", "enum": request.allowedAnchorKinds.map(\.rawValue)],
+                              "cue": text, "explanation": text, "imagePrompt": imagePrompt]),
+            "branches": array(object(["partOfSpeech": text, "meaningKey": text, "chineseMeaning": text,
+                                      "context": text, "signal": text, "explanation": text]),
+                              max: request.focusBranchID == nil ? 1 : max(1, request.existingCard?.branches.count ?? 1)),
             "coreImage": text,
-            "methods": array(object([
-                "id": text,
+            "methods": array(object(["id": text,
                 "kind": ["type": "string", "enum": MemoryMethodKind.allCases.map(\.rawValue)],
-                "title": text, "cue": text, "whyItHelps": text,
-                "isLanguageFact": ["type": "boolean"]
-            ])),
-            "transferCheck": object([
-                "sentence": text, "targetBranch": text, "answer": text, "clue": text
-            ]),
-            "caveat": ["type": ["string", "null"]]
-        ])
+                "title": text, "cue": text, "whyItHelps": text, "isLanguageFact": ["type": "boolean"]])),
+            "transferCheck": object(["sentence": text, "targetBranch": text, "answer": text, "clue": text]),
+            "caveat": nullable
+        ]
+        if request.strategy != nil {
+            let relation: [String: Any] = ["type": "string", "enum": WordRelation.allCases.map(\.rawValue)]
+            let evidence: [String: Any] = ["type": "string", "enum": ["modelUnverified", "mnemonic"]]
+            fields["analysis"] = object([
+                "surfaceWord": ["type": "string", "enum": [request.word]], "lemma": nullable,
+                "relations": array(relation, max: 4), "core": text, "change": nullable, "explanation": text,
+                "parts": array(object(["text": text, "start": ["type": "integer", "minimum": 0],
+                    "end": ["type": "integer", "minimum": 1],
+                    "kind": ["type": "string", "enum": WordPartKind.allCases.map(\.rawValue)],
+                    "meaning": nullable, "relation": relation, "evidence": evidence]), min: 0, max: 6),
+                "relatedWords": array(object(["word": text, "partOfSpeech": text, "meaning": text,
+                    "relation": relation, "evidence": ["type": "string", "enum": ["modelUnverified"]]]), min: 0, max: 3),
+                "notSuitableReason": nullable, "alternativeSuggestion": nullable
+            ])
+        }
+        return object(fields)
     }
 
     public static func instructions(for request: MemoryRequest) -> String {
-        func quoted(_ value: String) -> String {
-            String(decoding: try! JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed), as: UTF8.self)
+        let kind = request.requiredAnchorKind ?? .context
+        let meaningKey = request.focusMeaningKey ?? "meaning-1"
+        var example: [String: Any] = [
+            "word": request.word, "coreConcept": "简短核心关系",
+            "anchor": ["kind": kind.rawValue, "cue": "简短主线索", "explanation": "线索如何连接意思",
+                       "imagePrompt": kind == .letterIllustration ? "Create a letter-shaped illustration spelling exactly \(request.word)." as Any : NSNull()],
+            "branches": [["partOfSpeech": request.existingCard?.branches.first(where: { $0.id == request.focusBranchID })?.partOfSpeech ?? "verb",
+                          "meaningKey": meaningKey, "chineseMeaning": "当句意思", "context": "A short English sentence.",
+                          "signal": "句法或搭配线索", "explanation": "解释当句用法"]],
+            "coreImage": "简短建议画面",
+            "methods": [["id": "m1", "kind": kind == .sound ? "sound" : "context", "title": "主线索",
+                         "cue": "主线索", "whyItHelps": "关联理由", "isLanguageFact": false]],
+            "transferCheck": ["sentence": "A different English sentence.", "targetBranch": meaningKey,
+                              "answer": "当句意思", "clue": "判断线索"], "caveat": NSNull()
+        ]
+        if request.strategy != nil {
+            example["analysis"] = ["surfaceWord": request.word, "lemma": NSNull(), "relations": ["none"],
+                "core": "最有帮助的核心", "change": NSNull(), "explanation": "为什么采用本次方式；语言分析尚未经词典核验",
+                "parts": [], "relatedWords": [], "notSuitableReason": NSNull(), "alternativeSuggestion": NSNull()]
         }
-        let meaningKey = quoted(request.focusMeaningKey ?? "meaning-1")
-        let imagePrompt = request.preferredAnchorKind == .sound
-            ? "null" : quoted("Create a letter-shaped illustration of \(request.word), spelling exactly \(request.word). Describe the semantic scene here.")
         let schemaJSON = String(decoding: try! JSONSerialization.data(withJSONObject: schema(for: request), options: .sortedKeys), as: UTF8.self)
+        let exampleJSON = String(decoding: try! JSONSerialization.data(withJSONObject: example, options: .sortedKeys), as: UTF8.self)
         return """
-        输出契约：仅输出一个完整 JSON object，不能输出 Markdown、前后说明或第二个 object。
-        字段名区分大小写，所有 required 字段都必须出现；不要输出 alternateAnchor。字符串中的双引号、反斜杠和换行必须按 JSON 转义，不能使用单引号或尾逗号。
-        按 word、coreConcept、anchor、branches、coreImage、methods、transferCheck、caveat 的顺序输出。内容简短：一个主联想、一个重点情境、一个不同的新句；已有义项键按要求保留。transferCheck.targetBranch 必须等于 branches 中的一个 meaningKey。
-        branches 与 methods 各只输出一个元素。cue 用一句短句，explanation 用一至两句；coreConcept 与 coreImage 各一句。methods 复用主联想，不扩写另一套记法；两个英文句子各不超过 20 个词，signal、answer、clue 各一句。不要重复解释、列词典义项或在末尾继续追加内容；必须写完所有字段并关闭 JSON。
-        JSON Schema（描述字段约束，不要把 Schema 当作答案）：
+        仅输出一个完整 JSON object，不输出 Markdown 或第二个 object。required 字段必须出现（包括值为 null 的字段），不输出 alternateAnchor、anchors 或本地历史字段。
+        按 word、coreConcept、anchor、branches、coreImage、methods、transferCheck、caveat、analysis 的顺序输出，先完成首条线索。
+        内容简短：一个主线索、一个重点语境、一个不同的新句；branches 与 methods 通常各一个元素。仅 focus_branch 保留其他旧分支原字段不变。严格保留重点词性和 meaningKey。
+        cue、coreConcept、coreImage 各一句，explanation 一至两句，两个英文句子各不超过 20 词；methods 复用主线索。完整结束全部字段和括号。
+        拆分最多六块，start/end 是原词字符下标（从 0 开始，end 不含），按顺序覆盖全部原词拼写；无需拆分时 parts=[]。只展示一层，相关词最多三个。真实分析 evidence=modelUnverified，个人拆分 evidence=mnemonic；不冒充已核验词源。
+        JSON Schema：
         \(schemaJSON)
-        本次合法 JSON 结构示例（示例文字需替换成实际学习内容，kind 与 word 保持本次指定值）：
-        {"word":\(quoted(request.word)),"coreConcept":"简短核心关系","anchor":{"kind":\(quoted(request.preferredAnchorKind.rawValue)),"cue":"简短主联想","explanation":"词与核心意思的关联","imagePrompt":\(imagePrompt)},"branches":[{"partOfSpeech":"verb","meaningKey":\(meaningKey),"chineseMeaning":"当句意思","context":"A short English sentence.","signal":"句中判断线索","explanation":"核心关系如何落地"}],"coreImage":"简短联想画面","methods":[{"id":"m1","kind":\(quoted(request.preferredAnchorKind == .sound ? "sound" : "image")),"title":"主联想","cue":"具体记忆钩子","whyItHelps":"关联理由","isLanguageFact":false}],"transferCheck":{"sentence":"A different English sentence.","targetBranch":\(meaningKey),"answer":"当句意思","clue":"判断线索"},"caveat":null}
+        合法结构示例（替换内容，保持本次允许类型；不适合指定方法时写明具体原因和替代建议，保持指定类型）：
+        \(exampleJSON)
         """
     }
 
@@ -143,7 +173,7 @@ public enum MemoryResponseContract {
               let anchor = object["anchor"] as? [String: Any],
               let rawKind = anchor["kind"] as? String,
               let kind = MemoryAnchorKind(rawValue: rawKind),
-              matchesStructure(object, schema: schema(for: MemoryRequest(word: word, preferredAnchorKind: kind))) else { return nil }
+              matchesStructure(object, schema: schema(for: MemoryRequest(word: word, preferredAnchorKind: kind, strategy: object["analysis"] == nil ? nil : .auto))) else { return nil }
         return data
     }
 
@@ -162,12 +192,18 @@ public enum MemoryResponseContract {
             }
         }
         if let item = schema["items"] as? [String: Any] {
-            guard let array = value as? [Any], !array.isEmpty else { return false }
+            guard let array = value as? [Any], array.count >= (schema["minItems"] as? Int ?? 0),
+                  array.count <= (schema["maxItems"] as? Int ?? Int.max) else { return false }
             return array.allSatisfy { matchesStructure($0, schema: item) }
         }
         if schema["type"] as? String == "boolean" {
             guard let number = value as? NSNumber else { return false }
             return CFGetTypeID(number) == CFBooleanGetTypeID()
+        }
+        if schema["type"] as? String == "integer" {
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.rounded() == number.doubleValue else { return false }
+            return number.intValue >= (schema["minimum"] as? Int ?? Int.min)
         }
         guard let string = value as? String else { return false }
         if let values = schema["enum"] as? [String], !values.contains(string) { return false }

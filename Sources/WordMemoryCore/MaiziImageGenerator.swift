@@ -8,6 +8,8 @@ public enum MaiziImageError: LocalizedError {
     case invalidResponse
     case unsafeImageURL
     case imageTooLarge
+    case remoteFailed
+    case unsupportedAsync(String)
 
     public var errorDescription: String? {
         switch self {
@@ -17,7 +19,23 @@ public enum MaiziImageError: LocalizedError {
         case .invalidResponse: "图片服务没有返回可用的 URL 或 base64 图片"
         case .unsafeImageURL: "图片服务返回了不安全的图片地址"
         case .imageTooLarge: "图片服务返回的数据超过 20 MB"
+        case .remoteFailed: "图片服务报告生成失败；未自动重复提交"
+        case .unsupportedAsync: "服务返回了异步任务 ID，但查询协议尚未核验；结果待确认，不会自动重新生成"
         }
+    }
+
+    public var taskFailure: ImageTaskFailure {
+        let phase: String
+        let kind: String
+        switch self {
+        case .notConfigured: phase = "submitting"; kind = "authentication"
+        case .requestFailed(let status): phase = "submitting"; kind = status == 401 || status == 403 ? "authentication" : "rejected"
+        case .downloadFailed: phase = "downloading"; kind = "download"
+        case .invalidResponse, .unsafeImageURL, .imageTooLarge: phase = "response"; kind = "unsupported_format"
+        case .remoteFailed: phase = "generating"; kind = "remote_failure"
+        case .unsupportedAsync: phase = "response"; kind = "unsupported_async"
+        }
+        return ImageTaskFailure(phase: phase, kind: kind, message: localizedDescription)
     }
 }
 
@@ -33,6 +51,9 @@ public enum MaiziImageResponseParser {
             throw MaiziImageError.invalidResponse
         }
         let item = (root["data"] as? [[String: Any]])?.first ?? root
+        if (root["error"] != nil && !(root["error"] is NSNull)) || root["success"] as? Bool == false || root["status"] as? String == "failed" {
+            throw MaiziImageError.remoteFailed
+        }
         if let encoded = item["b64_json"] as? String ?? item["base64"] as? String {
             let value = encoded.components(separatedBy: "base64,").last ?? encoded
             guard let image = Data(base64Encoded: value), !image.isEmpty else {
@@ -48,6 +69,7 @@ public enum MaiziImageResponseParser {
             }
             return .url(url)
         }
+        if let taskID = item["task_id"] as? String ?? root["task_id"] as? String, !taskID.isEmpty { throw MaiziImageError.unsupportedAsync(String(taskID.prefix(256))) }
         throw MaiziImageError.invalidResponse
     }
 }
@@ -103,14 +125,28 @@ public enum ImageSecretStore {
     }
 }
 
-public struct MaiziImageGenerator: MemoryImageGenerator {
+public struct MaiziImageGenerator: StagedMemoryImageGenerator {
     private static let endpoint = URL(string: "https://www.maizitech.ai/v2/images/generations")!
     private static let maximumImageBytes = 20 * 1_024 * 1_024
+    private let session: URLSession
+    private let apiKeyProvider: @Sendable () async -> String?
 
-    public init() {}
+    public init(session: URLSession = .shared, apiKeyProvider: @escaping @Sendable () async -> String? = {
+        await Task.detached(priority: .userInitiated) { ImageSecretStore.load() }.value
+    }) {
+        self.session = session
+        self.apiKeyProvider = apiKeyProvider
+    }
 
     public func generateImage(prompt: String) async throws -> Data {
-        let key = await Task.detached(priority: .userInitiated) { ImageSecretStore.load() }.value
+        switch try await submitImage(prompt: prompt) {
+        case .imageData(let data): return data
+        case .url(let url): return try await downloadImage(from: url)
+        }
+    }
+
+    public func submitImage(prompt: String) async throws -> MaiziImageResult {
+        let key = await apiKeyProvider()
         guard let key, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MaiziImageError.notConfigured
         }
@@ -128,21 +164,19 @@ public struct MaiziImageGenerator: MemoryImageGenerator {
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try Task.checkCancellation()
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw MaiziImageError.requestFailed(status) }
         guard data.count <= 28 * 1_024 * 1_024 else { throw MaiziImageError.imageTooLarge }
-        switch try MaiziImageResponseParser.parse(data) {
-        case .imageData(let image): return image
-        case .url(let url): return try await downloadImage(from: url)
-        }
+        return try MaiziImageResponseParser.parse(data)
     }
 
-    private func downloadImage(from url: URL) async throws -> Data {
+    public func downloadImage(from url: URL) async throws -> Data {
+        guard url.scheme?.lowercased() == "https", url.host != nil else { throw MaiziImageError.unsafeImageURL }
         var request = URLRequest(url: url)
         request.timeoutInterval = 60
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         defer { bytes.task.cancel() }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw MaiziImageError.downloadFailed(status) }

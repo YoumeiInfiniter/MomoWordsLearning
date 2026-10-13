@@ -19,11 +19,14 @@ public final class MemoryStore {
         // Optional for memory.json files written before revision history existed.
         var revisions: [String: [MemoryCardRevision]]?
         var soundHistories: [String: SoundAnchorHistory]?
+        var histories: [String: SoundAnchorHistory]?
+        var redoRecords: [String: [MemoryRedoRecord]]?
     }
 
     public let fileURL: URL
     public let loadWarning: String?
     private var state: State
+    private var needsMigrationBackup = false
 
     public init(fileURL: URL? = nil) {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -33,6 +36,7 @@ public final class MemoryStore {
                let saved = try? JSONDecoder().decode(State.self, from: data) {
                 self.state = saved
                 self.loadWarning = nil
+                self.needsMigrationBackup = saved.histories == nil
             } else {
                 self.state = State()
                 self.loadWarning = StoreError.unreadableExistingFile.localizedDescription
@@ -53,6 +57,29 @@ public final class MemoryStore {
 
     public func revisions(for word: String) -> [MemoryCardRevision] {
         state.revisions?[word.lowercased()] ?? []
+    }
+
+    public func history(for word: String) -> SoundAnchorHistory {
+        let key = word.lowercased()
+        if let history = state.histories?[key], history.cards.indices.contains(history.selectedIndex),
+           history.cards.allSatisfy({ $0.word.lowercased() == key }) { return history }
+        if let history = state.soundHistories?[key], history.cards.indices.contains(history.selectedIndex) { return history }
+        var cards = revisions(for: word).map(\.previousCard).filter { $0.word.lowercased() == key }
+        if let card = state.cards[key] { cards.append(card) }
+        return SoundAnchorHistory(cards: cards, selectedIndex: max(0, cards.count - 1))
+    }
+
+    public func redoRecords(for word: String) -> [MemoryRedoRecord] { state.redoRecords?[word.lowercased()] ?? [] }
+
+    @discardableResult
+    public func moveHistory(for word: String, by offset: Int) throws -> MemoryCard? {
+        guard let history = history(for: word).moving(by: offset) else { return nil }
+        let card = history.cards[history.selectedIndex]
+        var next = state
+        var histories = next.histories ?? [:]; histories[word.lowercased()] = history
+        next.histories = histories; next.cards[word.lowercased()] = card
+        try persist(next); state = next
+        return card
     }
 
     public func soundHistory(for word: String) -> SoundAnchorHistory {
@@ -83,9 +110,10 @@ public final class MemoryStore {
         return card
     }
 
-    public func save(_ card: MemoryCard, replacing previousCard: MemoryCard? = nil, reason: String? = nil) throws {
+    public func save(_ card: MemoryCard, replacing previousCard: MemoryCard? = nil, reason: String? = nil, redoRecord: MemoryRedoRecord? = nil) throws {
         var next = state
         let wordKey = card.word.lowercased()
+        var generalHistory = history(for: card.word)
         if let previousCard {
             guard previousCard.word.lowercased() == wordKey, state.cards[wordKey] == previousCard else {
                 throw StoreError.staleRevision
@@ -107,6 +135,16 @@ public final class MemoryStore {
             history.cards[history.selectedIndex] = selectedSound
             next.soundHistories?[wordKey] = history
         }
+        if previousCard != nil || generalHistory.cards.isEmpty {
+            generalHistory.cards.append(card)
+            generalHistory.selectedIndex = generalHistory.cards.count - 1
+        } else if generalHistory.cards.indices.contains(generalHistory.selectedIndex) {
+            generalHistory.cards[generalHistory.selectedIndex] = card
+        }
+        var histories = next.histories ?? [:]; histories[wordKey] = generalHistory; next.histories = histories
+        if let redoRecord {
+            var records = next.redoRecords ?? [:]; records[wordKey, default: []].append(redoRecord); next.redoRecords = records
+        }
         next.cards[wordKey] = card
         for branch in card.branches {
             let key = BranchMemory.key(word: card.word, partOfSpeech: branch.partOfSpeech, meaningKey: branch.meaningKey)
@@ -120,11 +158,12 @@ public final class MemoryStore {
 
     public func recordEncounter(word: String) throws {
         let keys = state.branches.keys.filter { $0.hasPrefix(word.lowercased() + "|") }
+        var next = state
         for key in keys {
-            state.branches[key]?.encounterCount += 1
-            state.branches[key]?.updatedAt = Date()
+            next.branches[key]?.encounterCount += 1
+            next.branches[key]?.updatedAt = Date()
         }
-        if !keys.isEmpty { try persist() }
+        if !keys.isEmpty { try persist(next); state = next }
     }
 
     public func recordFeedback(word: String, branch: MeaningBranch, result: RecallResult, condition: RecallCondition, reason: ForgetReason?, note: String) throws {
@@ -135,8 +174,8 @@ public final class MemoryStore {
         memory.forgetReason = reason
         memory.userNote = note
         memory.updatedAt = Date()
-        state.branches[key] = memory
-        try persist()
+        var next = state; next.branches[key] = memory
+        try persist(next); state = next
     }
 
     public func selectMethod(word: String, branch: MeaningBranch, method: MemoryMethod, reason: String?) throws {
@@ -147,8 +186,8 @@ public final class MemoryStore {
             memory.methodVersions.append(version)
             memory.selectedMethodID = method.id
             memory.updatedAt = Date()
-            state.branches[key] = memory
-            try persist()
+            var next = state; next.branches[key] = memory
+            try persist(next); state = next
         }
     }
 
@@ -158,6 +197,11 @@ public final class MemoryStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(snapshot ?? state)
+        if needsMigrationBackup, FileManager.default.fileExists(atPath: fileURL.path) {
+            let backup = fileURL.deletingLastPathComponent().appendingPathComponent("memory-before-v3-\(UUID().uuidString).json")
+            try FileManager.default.copyItem(at: fileURL, to: backup)
+            needsMigrationBackup = false
+        }
         try data.write(to: fileURL, options: .atomic)
     }
 }

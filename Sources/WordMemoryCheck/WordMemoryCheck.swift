@@ -18,7 +18,12 @@ struct WordMemoryCheck {
         try preventOverwriteOfUnreadableHistory()
         try verifyImageStorage()
         try verifyMaiziImageResponse()
-        try await JSONContractChecks.run(card: sampleCard())
+        let sample = sampleCard()
+        let contractCard = MemoryCard(word: sample.word, coreConcept: sample.coreConcept, coreImage: sample.coreImage,
+            branches: sample.branches.filter { $0.meaningKey == sample.transferCheck.targetBranch }, methods: sample.methods,
+            transferCheck: sample.transferCheck, caveat: sample.caveat, anchor: sample.anchor)
+        try await JSONContractChecks.run(card: contractCard)
+        try await V3Checks.run(card: sample)
         print("word-memory-check: 通过 JSON 结尾安全恢复与中断诊断、历史导航与持久选择、联想重做、可选原因、旧卡归档、失败保护、思考开关、单次请求与存储检查")
     }
 
@@ -155,7 +160,7 @@ struct WordMemoryCheck {
             throw CheckError.failed("两种联想未能持久化")
         }
         let request = MemoryRequest(word: "state", preferredAnchorKind: .sound)
-        guard MemoryHarness.userPrompt(request).contains("用户指定的主联想：sound") else {
+        guard MemoryHarness.userPrompt(request).contains("允许的主联想类型：sound") else {
             throw CheckError.failed("用户选择没有进入模型提示词")
         }
         do {
@@ -303,6 +308,7 @@ struct WordMemoryCheck {
         // Simulate a 0.3.4 file with archives but no navigation timeline.
         var legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
         legacy.removeValue(forKey: "soundHistories")
+        legacy.removeValue(forKey: "histories")
         try JSONSerialization.data(withJSONObject: legacy).write(to: file)
         let migrated = MemoryStore(fileURL: file)
         guard migrated.loadWarning == nil,

@@ -74,11 +74,17 @@ public struct TransferCheck: Codable, Hashable, Sendable {
 public enum MemoryAnchorKind: String, Codable, CaseIterable, Sendable {
     case sound
     case letterIllustration
+    case morphology, familiarChunks, hybrid, wordForm, context
 
     public var label: String {
         switch self {
         case .sound: "谐音联想"
         case .letterIllustration: "字母插画"
+        case .morphology: "核心结构"
+        case .familiarChunks: "熟词拆分"
+        case .hybrid: "拆词＋谐音"
+        case .wordForm: "词形变化"
+        case .context: "场景联想"
         }
     }
 }
@@ -110,8 +116,10 @@ public struct MemoryCard: Codable, Hashable, Sendable {
     public let anchor: MemoryAnchor?
     /// The other user-requested approach, if it has already been prepared.
     public let alternateAnchor: MemoryAnchor?
+    public let anchors: [MemoryAnchor]?
+    public let analysis: WordAnalysis?
 
-    public init(word: String, coreConcept: String, coreImage: String, branches: [MeaningBranch], methods: [MemoryMethod], transferCheck: TransferCheck, caveat: String?, anchor: MemoryAnchor? = nil, alternateAnchor: MemoryAnchor? = nil) {
+    public init(word: String, coreConcept: String, coreImage: String, branches: [MeaningBranch], methods: [MemoryMethod], transferCheck: TransferCheck, caveat: String?, anchor: MemoryAnchor? = nil, alternateAnchor: MemoryAnchor? = nil, anchors: [MemoryAnchor]? = nil, analysis: WordAnalysis? = nil) {
         self.word = word
         self.coreConcept = coreConcept
         self.coreImage = coreImage
@@ -121,11 +129,14 @@ public struct MemoryCard: Codable, Hashable, Sendable {
         self.caveat = caveat
         self.anchor = anchor
         self.alternateAnchor = alternateAnchor
+        self.anchors = anchors
+        self.analysis = analysis
     }
 
     public func anchor(for kind: MemoryAnchorKind) -> MemoryAnchor? {
         if anchor?.kind == kind { return anchor }
         if alternateAnchor?.kind == kind { return alternateAnchor }
+        if let saved = anchors?.first(where: { $0.kind == kind }) { return saved }
         return nil
     }
 
@@ -148,7 +159,45 @@ public struct MemoryCard: Codable, Hashable, Sendable {
     private func replacingAnchors(selected: MemoryAnchor, alternate: MemoryAnchor?) -> MemoryCard {
         MemoryCard(word: word, coreConcept: coreConcept, coreImage: coreImage,
                    branches: branches, methods: methods, transferCheck: transferCheck,
-                   caveat: caveat, anchor: selected, alternateAnchor: alternate)
+                   caveat: caveat, anchor: selected, alternateAnchor: alternate,
+                   anchors: anchors, analysis: analysis)
+    }
+
+    public func preservingAnchors(from previous: MemoryCard) -> MemoryCard {
+        var saved = previous.anchors ?? []
+        for item in [previous.anchor, previous.alternateAnchor].compactMap({ $0 }) {
+            if !saved.contains(where: { $0.kind == item.kind }) { saved.append(item) }
+        }
+        saved.removeAll { $0.kind == anchor?.kind }
+        return MemoryCard(word: word, coreConcept: coreConcept, coreImage: coreImage, branches: branches,
+                          methods: methods, transferCheck: transferCheck, caveat: caveat, anchor: anchor,
+                          alternateAnchor: anchor?.kind == .letterIllustration ? nil : previous.anchor(for: .letterIllustration), anchors: saved, analysis: analysis)
+    }
+
+    public var versionKey: String {
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        // Selection of a prepared anchor doesn't change the text version's identity.
+        let data = (try? encoder.encode(VersionContent(card: self))) ?? Data(word.utf8)
+        return MemoryIdentity.digest(String(decoding: data, as: UTF8.self))
+    }
+    private struct VersionContent: Encodable {
+        let card: MemoryCard
+        func encode(to encoder: any Encoder) throws {
+            var values = encoder.unkeyedContainer()
+            try values.encode(card.word.lowercased()); try values.encode(card.coreConcept)
+            try values.encode(card.coreImage); try values.encode(card.branches); try values.encode(card.methods)
+            try values.encode(card.transferCheck); try values.encode(card.analysis)
+            var all = card.anchors ?? []
+            for item in [card.anchor, card.alternateAnchor].compactMap({ $0 }) {
+                if !all.contains(item) { all.append(item) }
+            }
+            try values.encode(all.sorted { $0.kind.rawValue < $1.kind.rawValue })
+        }
+    }
+
+    public var illustrationPrompt: String {
+        if anchor?.kind == .letterIllustration, let prompt = anchor?.imagePrompt { return prompt }
+        return "Create one clear, simple mnemonic illustration for the English word \(word). Meaning: \(coreConcept). Main cue: \(anchor?.cue ?? coreImage). Scene: \(coreImage). Depict only this useful relationship. Linguistic structure and personal mnemonic are distinct; do not invent etymology. No additional labels or text. If letters are shown, spell exactly \(word)."
     }
 }
 

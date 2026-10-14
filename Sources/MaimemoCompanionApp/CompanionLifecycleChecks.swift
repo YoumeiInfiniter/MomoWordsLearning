@@ -19,6 +19,7 @@ struct CompanionLifecycleChecks {
         try await checks.testCapturedTextRequestSavesToOriginalWordWhenPageChanges()
         try await checks.testFailedNewCardKeepsOriginalAndBranchPresetNeedsSelection()
         try await checks.testFailureReturnAndCachedAnchorNeverSubmit()
+        try checks.testLocalReceivedResponseRecovery()
         print("companion-lifecycle-check: 切词、设置、收起、重复点击、旧图与新版本隔离、历史零请求、原词保存和失败保护通过")
     }
     static func previewModel() -> CompanionViewModel {
@@ -47,6 +48,30 @@ struct CompanionLifecycleChecks {
             imageGenerator: DelayedImage(data: try! checks.png()), modelClient: OpenAICompatibleClient(session: URLSession(configuration: configuration)),
             modelConfiguration: ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!, model: "fixture", apiKey: "fixture-only"), checkStoredKeys: false)
         model.applySnapshot(checks.snapshot("helpfulness")); model.revealMemoryHelp()
+        return model
+    }
+
+    static func recoveryPreviewModel() -> CompanionViewModel {
+        let checks = Self(); let directory = try! checks.temporaryDirectory()
+        var object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(checks.card("neighborhood"))) as! [String: Any]
+        object["coreConcept"] = "以 -hood 把邻居变成邻居关系覆盖的一圈地方或人群"
+        object["anchor"] = ["kind": "morphology", "cue": "neighbor + -hood：邻居关系铺开成一片", "explanation": "neighbor 是邻居，-hood 表示状态或范围。"]
+        object["branches"] = [["partOfSpeech": "noun", "meaningKey": "area", "chineseMeaning": "街区", "context": "Our neighborhood is quiet.", "signal": "名词主语", "explanation": "指邻里所在区域。"]]
+        object["transferCheck"] = ["sentence": "She moved to a new neighborhood.", "targetBranch": "area", "answer": "她搬到一个新街区。", "clue": "a new 后的名词表示地区"]
+        object["analysis"] = ["surfaceWord": "neighborhood", "relations": ["derivation"], "core": "neighbor", "explanation": "把核心词和后缀连起来；分析尚未经词典核验。",
+            "parts": [["text": "neighbor", "kind": "base", "meaning": "邻居", "relation": "derivation", "evidence": "modelUnverified", "start": 1, "end": 8],
+                      ["text": "-hood", "kind": "suffix", "meaning": "状态或范围", "relation": "derivation", "evidence": "modelUnverified", "start": 9, "end": 13]], "relatedWords": []]
+        let raw = String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        let store = MemoryStore(fileURL: directory.appendingPathComponent("memory.json"))
+        let config = ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!, model: "fixture", apiKey: "fixture-only")
+        let journal = FailedMemoryResponseStore(fileURL: directory.appendingPathComponent("failed-memory-responses.json"))
+        try! journal.save(FailedMemoryResponse(request: MemoryRequest(word: "neighborhood", strategy: .auto), content: raw,
+            failureReason: "模拟旧版拆分字段校验失败", finishReason: "stop", configuration: config))
+        Fixture.configure(raw)
+        let sessionConfig = URLSessionConfiguration.ephemeral; sessionConfig.protocolClasses = [Fixture.self]
+        let model = CompanionViewModel(memoryStore: store, imageStore: MemoryImageStore(directoryURL: directory.appendingPathComponent("images")),
+            modelClient: OpenAICompatibleClient(session: URLSession(configuration: sessionConfig)), modelConfiguration: config, checkStoredKeys: false)
+        model.applySnapshot(checks.snapshot("neighborhood")); model.revealMemoryHelp()
         return model
     }
 
@@ -160,6 +185,42 @@ struct CompanionLifecycleChecks {
         model.learnerNote = "不要谐音"; model.regenerate(.naturalSound)
         try Self.equal(Fixture.count, 1)
         try Self.notNil(model.memoryError)
+    }
+
+    func testLocalReceivedResponseRecovery() throws {
+        let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MemoryStore(fileURL: directory.appendingPathComponent("memory.json"))
+        let config = ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!, model: "fixture", apiKey: "fixture-only")
+        let original = card("help")
+        var received = try JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as! [String: Any]
+        received["anchor"] = ["kind": "morphology", "cue": "helpful + -ness", "explanation": "先认出 helpful，再认出名词词缀", "imagePrompt": NSNull()]
+        received["word"] = "helpfulness"
+        received["analysis"] = ["surfaceWord": "helpfulness", "relations": ["derivation"], "core": "helpful", "explanation": "只拆一层",
+            "parts": [["text": "helpful", "kind": "base", "meaning": "有帮助的", "relation": "derivation", "evidence": "modelUnverified", "start": 0, "end": 7],
+                      ["text": "-ness", "kind": "suffix", "meaning": "性质", "relation": "derivation", "evidence": "modelUnverified", "start": 8, "end": 13]], "relatedWords": []]
+        let raw = String(decoding: try JSONSerialization.data(withJSONObject: received), as: UTF8.self)
+        let request = MemoryRequest(word: "helpfulness", learnerNote: "上次的补充", strategy: .auto)
+        let journal = FailedMemoryResponseStore(fileURL: directory.appendingPathComponent("failed-memory-responses.json"))
+        try journal.save(FailedMemoryResponse(request: request, content: raw, failureReason: "旧规则位置错误", finishReason: "stop", configuration: config))
+        Fixture.configure("{broken")
+        let model = CompanionViewModel(memoryStore: store, imageStore: MemoryImageStore(directoryURL: directory.appendingPathComponent("images")), modelConfiguration: config, checkStoredKeys: false)
+        model.applySnapshot(snapshot("helpfulness")); model.revealMemoryHelp()
+        try Self.no(model.isGenerating); try Self.equal(Fixture.count, 0)
+        try Self.notNil(model.quickHint); try Self.yes(model.canReparseCurrentResponse)
+        model.learnerNote = "尚未提交的新补充"
+        model.reparseReceivedResponse()
+        try Self.equal(model.memoryCard?.analysis?.parts.map(\.text), ["helpful", "ness"])
+        try Self.equal(model.learnerNote, "尚未提交的新补充")
+        try Self.isNil(model.memoryError); try Self.equal(Fixture.count, 0)
+        try Self.yes(model.imageTasks.records.isEmpty)
+        try Self.equal(store.redoRecords(for: "helpfulness").first?.userSupplement, "上次的补充")
+        try Self.yes(model.failedResponses.entries.isEmpty)
+        let renewed = request.renewed()
+        try Self.no(renewed.requestID == request.requestID)
+        try Self.equal(renewed.word, request.word); try Self.equal(renewed.learnerNote, request.learnerNote)
+        // A later version must never be replaced by a previously received answer.
+        try model.failedResponses.save(FailedMemoryResponse(request: request, content: raw, failureReason: "旧规则", finishReason: "stop", configuration: config))
+        try Self.no(model.canReparseCurrentResponse)
     }
 
     func card(_ word: String, multiple: Bool = false) -> MemoryCard {

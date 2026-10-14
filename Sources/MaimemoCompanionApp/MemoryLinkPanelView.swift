@@ -16,6 +16,7 @@ struct MemoryLinkPanelView: View {
                 revisionControls
                 illustrationArea
             } else if let hint = model.quickHint {
+                Text("临时线索 · 完整卡片尚未校验保存").font(.caption2).foregroundStyle(.secondary)
                 anchorContent(hint.anchor)
                 coreMeaning(hint.coreConcept)
                 if let branch = hint.branch { contextLine(branch) }
@@ -24,9 +25,11 @@ struct MemoryLinkPanelView: View {
                 progressLine
             } else {
                 Text(model.modelIsConfigured ? "线索尚未准备好" : "先接入记忆模型")
-                Button(model.modelIsConfigured ? "生成线索 · 可能计费" : "配置模型") {
-                    if model.modelIsConfigured { model.generateMemoryCard() } else { model.openSettings() }
-                }.buttonStyle(.bordered)
+                if model.memoryError == nil {
+                    Button(model.modelIsConfigured ? "生成线索 · 可能计费" : "配置模型") {
+                        if model.modelIsConfigured { model.generateMemoryCard() } else { model.openSettings() }
+                    }.buttonStyle(.bordered)
+                }
             }
             if model.isMemoryRevealed, let error = model.memoryError {
                 Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
@@ -35,7 +38,17 @@ struct MemoryLinkPanelView: View {
                     if model.quickHint != nil {
                         Text("首条线索仍可查看；完整卡片尚未保存").font(.caption2).foregroundStyle(.secondary)
                     }
-                    Button("重新生成 · 可能计费") { model.retrySelectedAnchor() }.buttonStyle(.bordered)
+                    if model.currentFailedResponse != nil {
+                        Text("已接收的回答保留在本机；本地解析不产生模型用量")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if model.canReparseCurrentResponse {
+                            Button("重新解析已接收内容 · 不调用模型") { model.reparseReceivedResponse() }
+                                .buttonStyle(.bordered).font(.caption)
+                        }
+                    }
+                    Button(model.currentFailedResponse == nil ? "重新生成 · 可能计费" : "按上次请求重新生成 · 可能计费") {
+                        model.retrySelectedAnchor()
+                    }.buttonStyle(.bordered).font(.caption)
                 }
             }
         }

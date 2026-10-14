@@ -16,7 +16,7 @@ public enum MemoryHarnessError: LocalizedError {
     }
 }
 
-public struct MemoryRequest: Sendable {
+public struct MemoryRequest: Codable, Sendable {
     public let word: String
     public let learnerNote: String
     public let previousReason: ForgetReason?
@@ -54,6 +54,13 @@ public struct MemoryRequest: Sendable {
         self.previousUserNote = previousUserNote
     }
 
+    public func renewed() -> MemoryRequest {
+        MemoryRequest(word: word, learnerNote: learnerNote, previousReason: previousReason, preferredMethod: preferredMethod,
+            previousMethod: previousMethod, existingCard: existingCard, focusMeaningKey: focusMeaningKey,
+            preferredAnchorKind: preferredAnchorKind, isAnchorRevision: isAnchorRevision, strategy: strategy, preset: preset,
+            reasonTags: reasonTags, visibleContext: visibleContext, focusBranchID: focusBranchID, previousUserNote: previousUserNote)
+    }
+
     public static func revisingSound(_ card: MemoryCard, reason: String?) -> MemoryRequest {
         MemoryRequest(word: card.word, learnerNote: reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
                       previousMethod: card.anchor(for: .sound)?.cue, existingCard: card,
@@ -68,7 +75,7 @@ public enum MemoryHarness {
     严格按以下顺序思考，但只输出 JSON：
     1. 找一个真实且可迁移的核心语义关系，优先检查常见名词、动词、形容词等用法；如果不同义项确实不相连，明确在 caveat 说明，不编造统一故事。
     2. 智能策略 auto 先检查词形变化，再检查可靠构词，再评估熟词切块与声音；按可靠性、熟悉度（未知时不推断）、负担与语义关联选一种或简短组合，不按长短硬分。用户明确指定的方法优先，anchor.kind 严格遵守契约；不适合就在 analysis.notSuitableReason 说明具体原因，alternativeSuggestion 给简短建议，保持指定类型，不伪装成另一方法，不追加请求。sound 不冒充标准发音或词源；没有自然谐音就坦白说明。letterIllustration 画准确字母与核心关系，imagePrompt 为非空英文并含准确拼写。
-    屈折 inflection、派生 derivation、复合 compound、个人拆分 mnemonicSplit 必须分开。词根不一定能独立使用；陌生词根不能仅凭字母重合认定。部件按原词准确字符范围顺序覆盖全部拼写；熟词借音、字母变化必须在 explanation 明说，不能漏字、加字或调序。任意字母可以 meaning=null。所有模型语言分析 evidence=modelUnverified，助记 evidence=mnemonic；结构校验不等于词典核验。默认只拆一层，最多三个常用相关词，屈折和派生分开，不能自动认为词族已会。-s 与词形还原有歧义时不强行选唯一原形。
+    屈折 inflection、派生 derivation、复合 compound、个人拆分 mnemonicSplit 必须分开。词根不一定能独立使用；陌生词根不能仅凭字母重合认定。部件 text 按原词顺序覆盖全部准确拼写；不要输出字符位置，不写 -hood 或 un- 这样的词缀记号；熟词借音、字母变化必须在 explanation 明说，不能漏字、加字或调序。任意字母可以 meaning=null。所有模型语言分析 evidence=modelUnverified，助记 evidence=mnemonic；结构校验不等于词典核验。默认只拆一层，最多三个常用相关词，屈折和派生分开，不能自动认为词族已会。-s 与词形还原有歧义时不强行选唯一原形。
     小型参考样例：helped 是 help 的语法变化；helpful/helpless 是派生的形容词；helpfulness 优先拆 helpful + -ness（名词性质），而不是堆叠每个部件。词缀可能提示词性，不保证机械推出完整意思。拼写不变的词性变化仍看句法；involvement 是名词，中文“参与／卷入”不能当作英文动词证据。
     3. 只选当前最有帮助的一个常见语境分支，给简短英文句子、可观察信号、当句中文意思，并说明核心关系如何在这里落地；若直观名词义已由背词软件展示，而这个词还有常见抽象动词／形容词义，优先用后者检验核心关系。不要堆叠中文同义词，也不要替代背词软件的词典。
     4. 其他记忆方法只作为内部候选，不在主界面罗列；谐音、拆字或画面联想不能冒充语言事实。
@@ -123,7 +130,7 @@ public enum MemoryHarness {
     }
 
     public static func parse(_ raw: String, expectedWord: String, requiredMeaningKey: String? = nil, requiredAnchorKind: MemoryAnchorKind? = nil) throws -> MemoryCard {
-        let data = try MemoryResponseContract.normalizedData(from: raw)
+        let data = try MemoryResponseNormalizer.normalize(MemoryResponseContract.normalizedData(from: raw))
         let card: MemoryCard
         do {
             card = try JSONDecoder().decode(MemoryCard.self, from: data)
@@ -249,14 +256,16 @@ public enum MemoryHarness {
         }
         let characters = Array(word)
         var position = 0
-        for part in analysis.parts {
+        for (index, part) in analysis.parts.enumerated() {
             guard part.start == position, part.end > part.start, part.end <= characters.count,
                   String(characters[part.start..<part.end]) == part.text,
-                  analysis.relations.contains(part.relation),
-                  (part.relation != .mnemonicSplit || part.evidence == .mnemonic),
+                  analysis.relations.contains(part.relation) else {
+                throw MemoryHarnessError.invalidResponse("analysis.parts[\(index)] 的位置、拼写或关系与当前词不一致")
+            }
+            guard (part.relation != .mnemonicSplit || part.evidence == .mnemonic),
                   (part.kind != .letters || part.evidence == .mnemonic),
                   (part.evidence != .mnemonic || part.relation == .mnemonicSplit) else {
-                throw MemoryHarnessError.invalidResponse("拆分未准确覆盖原词或助记被标为语言事实")
+                throw MemoryHarnessError.invalidResponse("部件 \(part.text) 的关系与 evidence 标签冲突；个人助记不能标成语言事实")
             }
             position = part.end
         }

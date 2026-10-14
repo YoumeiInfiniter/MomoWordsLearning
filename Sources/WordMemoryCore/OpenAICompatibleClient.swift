@@ -114,63 +114,83 @@ public struct OpenAICompatibleClient: Sendable {
         return result
     }
 
-    /// One model request streams the first usable clue, then validates the complete card.
+    /// A rejected answer is delivered locally without another HTTP request.
     public func generateStreaming(
         _ request: MemoryRequest,
         configuration: ModelConfiguration,
+        onFailure: @Sendable (FailedMemoryResponse) async -> Void = { _ in },
         onQuickHint: @Sendable (QuickMemoryHint) async -> Void
     ) async throws -> MemoryCard {
         let urlRequest = try Self.makeRequest(request, configuration: configuration, streaming: true)
-        let (bytes, response) = try await session.bytes(for: urlRequest)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else {
-            bytes.task.cancel()
-            throw MemoryHarnessError.requestFailed(status)
-        }
-        defer { bytes.task.cancel() }
-
         var accumulator = ChatCompletionStreamAccumulator()
-        var decoder = ServerSentEventDecoder()
         var rawResponse = Data()
-        var didEmitHint = false
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            if rawResponse.count < 1_048_576 { rawResponse.append(byte) }
-            if let event = decoder.append(byte) {
-                try accumulator.append(event.data)
-                if accumulator.isDone { break }
-                if !didEmitHint,
-                       let hint = MemoryHarness.quickHint(from: accumulator.content, expectedWord: request.word),
+        var receivedContent = ""
+        var receivedFinish: String?
+        do {
+            let (bytes, response) = try await session.bytes(for: urlRequest)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(status) else { bytes.task.cancel(); throw MemoryHarnessError.requestFailed(status) }
+            defer { bytes.task.cancel() }
+            var decoder = ServerSentEventDecoder()
+            var didEmitHint = false
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                if rawResponse.count < 1_048_576 { rawResponse.append(byte) }
+                if let event = decoder.append(byte) {
+                    try accumulator.append(event.data)
+                    if accumulator.isDone { break }
+                    if !didEmitHint, let hint = MemoryHarness.quickHint(from: accumulator.content, expectedWord: request.word),
                        request.allowedAnchorKinds.contains(hint.anchor.kind) {
-                    didEmitHint = true
-                    await onQuickHint(hint)
+                        didEmitHint = true; await onQuickHint(hint)
+                    }
                 }
             }
-        }
-        if !accumulator.isDone, let event = decoder.finish() {
-            try accumulator.append(event.data)
-        }
-        try Task.checkCancellation()
-        let isJSONEnvelope = rawResponse.first(where: { ![9, 10, 13, 32].contains($0) }) == 123
-        let content = accumulator.content.isEmpty && isJSONEnvelope
-            ? try ChatCompletionResponse.content(from: rawResponse)
-            : try accumulator.completedContent()
-        do {
-            let card = try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.requiredAnchorKind)
-            try MemoryResponseContract.validateStructure(content, for: request)
-            try MemoryHarness.validate(card, for: request)
-            return card
-        } catch MemoryHarnessError.invalidResponse(let reason) where reason.contains("JSON 对象未完整返回") && !accumulator.content.isEmpty {
-            throw MemoryHarnessError.invalidResponse("\(reason)；\(accumulator.terminationDescription)；已接收 \(content.utf8.count) 字节，未自动重试")
+            if !accumulator.isDone, let event = decoder.finish() { try accumulator.append(event.data) }
+            try Task.checkCancellation()
+            let isJSONEnvelope = rawResponse.first(where: { ![9, 10, 13, 32].contains($0) }) == 123
+            if accumulator.content.isEmpty && isJSONEnvelope {
+                let received = ChatCompletionResponse.receivedAnswer(from: rawResponse)
+                receivedContent = received.content ?? ""; receivedFinish = received.finishReason
+                let content = try ChatCompletionResponse.content(from: rawResponse)
+                return try Self.parse(content, for: request)
+            }
+            receivedContent = accumulator.content
+            receivedFinish = accumulator.wasRefused ? "content_filter" : accumulator.finishReason
+            let content = try accumulator.completedContent()
+            return try Self.parse(content, for: request)
+        } catch {
+            var reportedError = error
+            if case MemoryHarnessError.invalidResponse(let reason) = error,
+               reason.contains("JSON 对象未完整返回"), !accumulator.content.isEmpty {
+                reportedError = MemoryHarnessError.invalidResponse("\(reason)；\(accumulator.terminationDescription)；已接收 \(accumulator.content.utf8.count) 字节，未自动重试")
+            }
+            if receivedContent.isEmpty { receivedContent = accumulator.content }
+            if receivedFinish == nil { receivedFinish = accumulator.wasRefused ? "content_filter" : accumulator.finishReason }
+            if !Task.isCancelled, !receivedContent.isEmpty, receivedContent.utf8.count <= 1_048_576 {
+                await onFailure(FailedMemoryResponse(request: request, content: receivedContent,
+                    failureReason: reportedError.localizedDescription, finishReason: receivedFinish, configuration: configuration))
+            }
+            throw reportedError
         }
     }
 
-    public func generate(_ request: MemoryRequest, configuration: ModelConfiguration) async throws -> MemoryCard {
+    public func generate(_ request: MemoryRequest, configuration: ModelConfiguration,
+                         onFailure: @Sendable (FailedMemoryResponse) async -> Void = { _ in }) async throws -> MemoryCard {
         let urlRequest = try Self.makeRequest(request, configuration: configuration, streaming: false)
         let (data, response) = try await session.data(for: urlRequest)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw MemoryHarnessError.requestFailed(status) }
-        let content = try ChatCompletionResponse.content(from: data)
+        do { return try Self.parse(ChatCompletionResponse.content(from: data), for: request) }
+        catch {
+            let received = ChatCompletionResponse.receivedAnswer(from: data)
+            if let content = received.content, !content.isEmpty, content.utf8.count <= 1_048_576 {
+                await onFailure(FailedMemoryResponse(request: request, content: content, failureReason: error.localizedDescription,
+                    finishReason: received.finishReason, configuration: configuration))
+            }
+            throw error
+        }
+    }
+    private static func parse(_ content: String, for request: MemoryRequest) throws -> MemoryCard {
         let card = try MemoryHarness.parse(content, expectedWord: request.word, requiredMeaningKey: request.focusMeaningKey, requiredAnchorKind: request.requiredAnchorKind)
         try MemoryResponseContract.validateStructure(content, for: request)
         try MemoryHarness.validate(card, for: request)

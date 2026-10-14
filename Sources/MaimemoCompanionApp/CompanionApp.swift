@@ -46,6 +46,7 @@ final class CompanionViewModel: ObservableObject {
 
     let reader: MaimemoAccessibilityReader
     let memoryStore: MemoryStore
+    let failedResponses: FailedMemoryResponseStore
     let imageStore: MemoryImageStore
     private let injectedImageGenerator: (any MemoryImageGenerator)?
     private var previousWord: String?
@@ -75,6 +76,7 @@ final class CompanionViewModel: ObservableObject {
         self.injectedModelConfiguration = modelConfiguration
         self.reader = reader
         self.memoryStore = memoryStore
+        self.failedResponses = FailedMemoryResponseStore(fileURL: memoryStore.fileURL.deletingLastPathComponent().appendingPathComponent("failed-memory-responses.json"))
         self.imageStore = imageStore
         self.imageTasks = ImageTaskManager(imageStore: imageStore)
         self.injectedImageGenerator = imageGenerator
@@ -151,6 +153,11 @@ final class CompanionViewModel: ObservableObject {
                 memoryImageURL = memoryCard.flatMap { imageURL(for: $0) }
                 imageError = nil
                 quickHint = quickHints[word.lowercased()]
+                if quickHint == nil, let received = failedResponses.latest(for: word), received.finishReason != "content_filter",
+                   let hint = MemoryHarness.quickHint(from: received.content, expectedWord: word),
+                   received.request.allowedAnchorKinds.contains(hint.anchor.kind) {
+                    quickHint = hint
+                }
                 selectedBranchID = memoryCard?.branches.first?.id
                 showAnswer = false
                 learnerNote = ""
@@ -173,7 +180,10 @@ final class CompanionViewModel: ObservableObject {
             learnerNote = ""
             reasonTags = []; needsBranchSelection = false
         }
-        if next.word != previousWord { memoryError = next.word.flatMap { generationErrors[$0.lowercased()] } ?? memoryStore.loadWarning }
+        if next.word != previousWord {
+            memoryError = next.word.flatMap { generationErrors[$0.lowercased()] ?? failedResponses.latest(for: $0)?.failureReason }
+                ?? memoryStore.loadWarning ?? failedResponses.loadWarning
+        }
         previousWord = next.word
         if next.word != snapshot.word || next.appFound != snapshot.appFound || next.isTrusted != snapshot.isTrusted {
             snapshot = next
@@ -214,7 +224,8 @@ final class CompanionViewModel: ObservableObject {
 
     private func generateRevealedCardIfNeeded() {
         guard snapshot.word != nil, isMemoryRevealed, !showSettings,
-              memoryStore.loadWarning == nil, generationErrors[snapshot.word!.lowercased()] == nil,
+              memoryStore.loadWarning == nil, failedResponses.loadWarning == nil,
+              failedResponses.latest(for: snapshot.word!) == nil, generationErrors[snapshot.word!.lowercased()] == nil,
               memoryCard == nil, quickHint == nil, !isGenerating, modelIsConfigured else { return }
         generateMemoryCard()
     }
@@ -234,7 +245,47 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
-    func retrySelectedAnchor() { generateMemoryCard() }
+    var currentFailedResponse: FailedMemoryResponse? {
+        snapshot.word.flatMap { failedResponses.latest(for: $0) }
+    }
+    var canReparseCurrentResponse: Bool {
+        guard let response = currentFailedResponse else { return false }
+        return !isGenerating && response.canReparse && response.request.existingCard == memoryCard
+    }
+    func retrySelectedAnchor() {
+        if let response = currentFailedResponse, response.request.existingCard == memoryCard {
+            generateMemoryCard(capturedRequest: response.request.renewed())
+        } else { generateMemoryCard() }
+    }
+    func reparseReceivedResponse() {
+        guard let response = currentFailedResponse, canReparseCurrentResponse else { return }
+        do {
+            let generated = try response.parseLocally()
+            guard memoryStore.card(for: response.request.word) == response.request.existingCard else { throw MemoryStore.StoreError.staleRevision }
+            let card = response.request.existingCard.map { generated.preservingAnchors(from: $0) } ?? generated
+            let record = MemoryRedoRecord(request: response.request, card: card, model: response.model,
+                endpoint: response.endpoint, thinkingEnabled: response.thinkingEnabled)
+            try memoryStore.save(card, replacing: response.request.existingCard, reason: response.request.learnerNote, redoRecord: record)
+            try? failedResponses.remove(for: card.word)
+            memoryCard = card; selectedAnchorKind = card.anchor?.kind ?? .context
+            quickHint = nil; quickHints.removeValue(forKey: card.word.lowercased())
+            selectedBranchID = response.request.focusBranchID ?? card.branches.first?.id
+            showAnswer = false; memoryError = nil; generationErrors.removeValue(forKey: card.word.lowercased())
+            refreshImageState()
+            // Local reprocessing never generates images, including an old illustration request.
+        } catch {
+            memoryError = error.localizedDescription + "；本次只在本机重新解析，未请求模型"
+            if let word = snapshot.word { generationErrors[word.lowercased()] = memoryError }
+        }
+    }
+    private func receiveFailedResponse(_ response: FailedMemoryResponse) {
+        guard activeGenerations[response.request.word.lowercased()] == response.id else { return }
+        do { try failedResponses.save(response) }
+        catch {
+            generationErrors[response.request.word.lowercased()] = response.failureReason + "；响应仅保留在本次运行内，暂存文件未写入"
+        }
+        objectWillChange.send()
+    }
 
     func regenerate(_ preset: MemoryPreset) {
         guard isMemoryRevealed, memoryCard != nil, !isGenerating else { return }
@@ -323,8 +374,9 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
-    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false, preset: MemoryPreset? = nil) {
+    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false, preset: MemoryPreset? = nil, capturedRequest: MemoryRequest? = nil) {
         guard let word = snapshot.word, !isGenerating else { return }
+        guard memoryStore.loadWarning == nil else { memoryError = memoryStore.loadWarning; return }
         let wordKey = word.lowercased()
         let modelName = modelText
         let requestThinkingEnabled = thinkingEnabled
@@ -335,7 +387,7 @@ final class CompanionViewModel: ObservableObject {
         let expectedStoredCard = memoryStore.card(for: word)
         let focused = preset == .focusBranch ? selectedBranch : nil
         let previous = branchHistory
-        let request = MemoryRequest(word: word, learnerNote: learnerNote,
+        let request = capturedRequest ?? MemoryRequest(word: word, learnerNote: learnerNote,
             previousReason: previous?.forgetReason, preferredMethod: selectedMethodKind,
             previousMethod: previous?.methodVersions.last?.method.cue, existingCard: original,
             focusMeaningKey: switchingAnchor ? nil : (focused?.meaningKey ?? selectedBranch?.meaningKey),
@@ -343,11 +395,12 @@ final class CompanionViewModel: ObservableObject {
             strategy: requestedAnchorKind == nil ? (preset?.strategy ?? .auto) : nil,
             preset: preset, reasonTags: RevisionReasonTag.allCases.filter { reasonTags.contains($0) },
             visibleContext: nil, focusBranchID: focused?.id, previousUserNote: previous?.userNote ?? "")
+        guard request.word == word, request.existingCard == original else { memoryError = MemoryStore.StoreError.staleRevision.localizedDescription; return }
         let generationID = request.requestID
         activeGenerations[wordKey] = generationID
         quickHint = nil; memoryError = nil; generationErrors.removeValue(forKey: wordKey)
         // Image choice authorizes one generation after the full text prompt passes validation.
-        let wantsImage = requestedAnchorKind == .letterIllustration
+        let wantsImage = request.requiredAnchorKind == .letterIllustration
         generationTasks[wordKey] = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -363,7 +416,9 @@ final class CompanionViewModel: ObservableObject {
                     throw MemoryHarnessError.notConfigured
                 }
                 let configuration = ModelConfiguration(endpoint: endpoint, model: modelName, apiKey: key, thinkingEnabled: requestThinkingEnabled)
-                let generated = try await modelClient.generateStreaming(request, configuration: configuration) { [weak self] hint in
+                let generated = try await modelClient.generateStreaming(request, configuration: configuration, onFailure: { [weak self] response in
+                    await self?.receiveFailedResponse(response)
+                }) { [weak self] hint in
                     await self?.receiveQuickHint(hint, generationID: generationID)
                 }
                 try Task.checkCancellation()
@@ -374,6 +429,7 @@ final class CompanionViewModel: ObservableObject {
                 safeEndpoint?.query = nil; safeEndpoint?.user = nil; safeEndpoint?.password = nil
                 let record = MemoryRedoRecord(request: request, card: card, model: modelName, endpoint: safeEndpoint?.string ?? endpoint.host ?? "", thinkingEnabled: requestThinkingEnabled)
                 try memoryStore.save(card, replacing: original, reason: request.learnerNote, redoRecord: record)
+                try? failedResponses.remove(for: word)
                 quickHints.removeValue(forKey: wordKey)
                 // Save to the captured word first. Visibility is independent of completion.
                 if snapshot.word == word {
@@ -385,8 +441,9 @@ final class CompanionViewModel: ObservableObject {
                 if wantsImage { enqueueIllustration(for: card) }
             } catch {
                 if !Task.isCancelled {
-                    generationErrors[wordKey] = error.localizedDescription
-                    if snapshot.word == word { memoryError = error.localizedDescription }
+                    let diagnostic = generationErrors[wordKey] ?? error.localizedDescription
+                    generationErrors[wordKey] = diagnostic
+                    if snapshot.word == word { memoryError = diagnostic }
                 }
             }
         }
@@ -790,7 +847,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     override init() {
         #if DEBUG
-        if (CommandLine.arguments.contains("--offline-preview") || Bundle.main.bundleIdentifier == "local.maimemo.companion.preview") { model = CompanionLifecycleChecks.previewModel() }
+        if (CommandLine.arguments.contains("--offline-preview") || Bundle.main.bundleIdentifier == "local.maimemo.companion.preview") {
+            model = Bundle.main.object(forInfoDictionaryKey: "MaimemoPreviewScenario") as? String == "response-recovery"
+                ? CompanionLifecycleChecks.recoveryPreviewModel() : CompanionLifecycleChecks.previewModel()
+        }
         else { model = CompanionViewModel() }
         #else
         model = CompanionViewModel()

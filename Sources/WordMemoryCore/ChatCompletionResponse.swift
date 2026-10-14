@@ -5,7 +5,7 @@ public struct ChatCompletionStreamAccumulator: Sendable {
     public private(set) var content = ""
     public private(set) var isDone = false
     public private(set) var finishReason: String?
-    private var wasRefused = false
+    public private(set) var wasRefused = false
 
     public init() {}
 
@@ -39,6 +39,13 @@ public struct ChatCompletionStreamAccumulator: Sendable {
 }
 
 public enum ChatCompletionResponse {
+    /// Reads only already received answer text. Finish flags still gate local recovery.
+    public static func receivedAnswer(from data: Data) -> (content: String?, finishReason: String?) {
+        guard let result = try? JSONDecoder().decode(Completion.self, from: data),
+              let choice = result.choices.first(where: { $0.index == 0 }) ?? result.choices.first else { return (nil, nil) }
+        return (choice.message.content, choice.message.refusal == nil ? choice.finish_reason : "content_filter")
+    }
+
     public static func content(from data: Data) throws -> String {
         guard let completion = try? JSONDecoder().decode(Completion.self, from: data),
               let choice = completion.choices.first(where: { $0.index == 0 }) ?? completion.choices.first else {

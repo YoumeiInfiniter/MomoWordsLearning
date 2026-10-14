@@ -43,7 +43,8 @@ enum JSONContractChecks {
         let restored = try MemoryHarness.parse(trailingCommas, expectedWord: "state")
         try require(restored.anchor?.cue == anchor["cue"] as? String, "格式恢复改写了字符串里的引号或标点")
 
-        try reject(String(json.dropLast()), word: "state", contains: "未完整返回")
+        try require(try MemoryHarness.parse(String(json.dropLast()), expectedWord: "state") == card,
+                    "可空字段省略且只缺结尾时未安全恢复")
         try reject("[\(json)]", word: "state", contains: "数组")
         try reject(json + "\n" + json, word: "state", contains: "多个")
         object.removeValue(forKey: "coreConcept")
@@ -206,7 +207,7 @@ enum JSONContractChecks {
         try reject(nested + ",", word: "state", contains: "未完整返回")
         try reject(String(complete.dropLast(2)), word: "state", contains: "未完整返回")
         try reject("[" + String(complete.dropLast()), word: "state", contains: "数组")
-        for key in ["coreConcept", "caveat", "transferCheck"] {
+        for key in ["coreConcept", "transferCheck"] {
             var missing = object
             missing.removeValue(forKey: key)
             let text = String(decoding: try JSONSerialization.data(withJSONObject: missing, options: .sortedKeys), as: UTF8.self)
@@ -235,7 +236,8 @@ enum JSONContractChecks {
         anchor.removeValue(forKey: "imagePrompt")
         object["anchor"] = anchor
         let missingNullable = String(decoding: try JSONSerialization.data(withJSONObject: object, options: .sortedKeys), as: UTF8.self)
-        try reject(String(missingNullable.dropLast()), word: "state", contains: "未完整返回")
+        try require(try MemoryHarness.parse(String(missingNullable.dropLast()), expectedWord: "state") == card,
+                    "省略可空生图字段未兼容为 null")
     }
 
     private static func streamWire(_ text: String, finish: String?, done: Bool) throws -> Data {

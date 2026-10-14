@@ -4,9 +4,10 @@ import Foundation
 public enum MemoryResponseContract {
     public static func validateStructure(_ raw: String, for request: MemoryRequest) throws {
         guard request.strategy != nil else { return }
-        let data = try normalizedData(from: raw)
-        guard let value = try? JSONSerialization.jsonObject(with: data), matchesStructure(value, schema: schema(for: request)) else {
-            throw MemoryHarnessError.invalidResponse("新版字段缺失、类型或数量不符合约定；nullable 字段也必须出现")
+        let data = try MemoryResponseNormalizer.normalize(normalizedData(from: raw))
+        let value = try MemoryResponseNormalizer.wireObject(data)
+        guard matchesStructure(value, schema: schema(for: request)) else {
+            throw MemoryHarnessError.invalidResponse("必需内容字段、类型或数量不符合约定；未补写学习内容")
         }
     }
     public static func schema(for request: MemoryRequest) -> [String: Any] {
@@ -40,8 +41,7 @@ public enum MemoryResponseContract {
             fields["analysis"] = object([
                 "surfaceWord": ["type": "string", "enum": [request.word]], "lemma": nullable,
                 "relations": array(relation, max: 4), "core": text, "change": nullable, "explanation": text,
-                "parts": array(object(["text": text, "start": ["type": "integer", "minimum": 0],
-                    "end": ["type": "integer", "minimum": 1],
+                "parts": array(object(["text": text,
                     "kind": ["type": "string", "enum": WordPartKind.allCases.map(\.rawValue)],
                     "meaning": nullable, "relation": relation, "evidence": evidence]), min: 0, max: 6),
                 "relatedWords": array(object(["word": text, "partOfSpeech": text, "meaning": text,
@@ -73,14 +73,25 @@ public enum MemoryResponseContract {
                 "core": "最有帮助的核心", "change": NSNull(), "explanation": "为什么采用本次方式；语言分析尚未经词典核验",
                 "parts": [], "relatedWords": [], "notSuitableReason": NSNull(), "alternativeSuggestion": NSNull()]
         }
+        if request.strategy != nil, [.morphology, .familiarChunks, .hybrid, .wordForm].contains(kind) {
+            var analysis = example["analysis"] as! [String: Any]
+            analysis["notSuitableReason"] = "格式示例尚未分析这个词的可靠拆分；实际回答应分析后填写或如实说明不适合"
+            analysis["alternativeSuggestion"] = "不适合时由用户另选方法"
+            example["analysis"] = analysis
+        }
         let schemaJSON = String(decoding: try! JSONSerialization.data(withJSONObject: schema(for: request), options: .sortedKeys), as: UTF8.self)
-        let exampleJSON = String(decoding: try! JSONSerialization.data(withJSONObject: example, options: .sortedKeys), as: UTF8.self)
+        let order = ["word", "coreConcept", "anchor", "branches", "coreImage", "methods", "transferCheck", "caveat", "analysis"]
+        func json(_ value: Any) -> String {
+            String(decoding: try! JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]), as: UTF8.self)
+        }
+        let exampleJSON = "{" + order.compactMap { name in example[name].map { json(name) + ":" + json($0) } }.joined(separator: ",") + "}"
         return """
         仅输出一个完整 JSON object，不输出 Markdown 或第二个 object。required 字段必须出现（包括值为 null 的字段），不输出 alternateAnchor、anchors 或本地历史字段。
         按 word、coreConcept、anchor、branches、coreImage、methods、transferCheck、caveat、analysis 的顺序输出，先完成首条线索。
         内容简短：一个主线索、一个重点语境、一个不同的新句；branches 与 methods 通常各一个元素。仅 focus_branch 保留其他旧分支原字段不变。严格保留重点词性和 meaningKey。
         cue、coreConcept、coreImage 各一句，explanation 一至两句，两个英文句子各不超过 20 词；methods 复用主线索。完整结束全部字段和括号。
-        拆分最多六块，start/end 是原词字符下标（从 0 开始，end 不含），按顺序覆盖全部原词拼写；无需拆分时 parts=[]。只展示一层，相关词最多三个。真实分析 evidence=modelUnverified，个人拆分 evidence=mnemonic；不冒充已核验词源。
+        部件格式示例（仅示范格式，不声明本次词的词源）：neighbor + hood 时 parts=[{"text":"neighbor","kind":"base","meaning":"邻居","relation":"derivation","evidence":"modelUnverified"},{"text":"hood","kind":"suffix","meaning":"状态或范围","relation":"derivation","evidence":"modelUnverified"}]。个人拆分用 relation=mnemonicSplit 与 evidence=mnemonic；无含义字母 meaning=null。
+        拆分最多六块，text 必须是原词连续片段，按原拼写顺序覆盖全词；不要输出 start/end，位置由本机计算。text 不写词缀记号连字符，例如 neighborhood 写 neighbor 和 hood，不写 -hood；unbelievable 写 un 和 believable，不写 un-。无需拆分时 parts=[]。只展示一层，相关词最多三个。真实分析 evidence=modelUnverified，个人拆分 evidence=mnemonic；不冒充已核验词源。
         JSON Schema：
         \(schemaJSON)
         合法结构示例（替换内容，保持本次允许类型；不适合指定方法时写明具体原因和替代建议，保持指定类型）：
@@ -172,8 +183,19 @@ public enum MemoryResponseContract {
               let word = object["word"] as? String,
               let anchor = object["anchor"] as? [String: Any],
               let rawKind = anchor["kind"] as? String,
-              let kind = MemoryAnchorKind(rawValue: rawKind),
-              matchesStructure(object, schema: schema(for: MemoryRequest(word: word, preferredAnchorKind: kind, strategy: object["analysis"] == nil ? nil : .auto))) else { return nil }
+              let kind = MemoryAnchorKind(rawValue: rawKind) else { return nil }
+        // Required learning content must already be complete. Only nullable omissions
+        // and locally derivable positions may be normalized before closure recovery.
+        guard let normalized = try? MemoryResponseNormalizer.normalize(data),
+              let wire = try? MemoryResponseNormalizer.wireObject(normalized) else { return nil }
+        let request = MemoryRequest(word: word, preferredAnchorKind: kind, strategy: object["analysis"] == nil ? nil : .auto)
+        var recoveredSchema = schema(for: request)
+        if object["analysis"] != nil, var properties = recoveredSchema["properties"] as? [String: Any],
+           var branches = properties["branches"] as? [String: Any], let count = (object["branches"] as? [Any])?.count {
+            // The actual request validates focus-branch count after recovery.
+            branches["maxItems"] = max(1, count); properties["branches"] = branches; recoveredSchema["properties"] = properties
+        }
+        guard matchesStructure(wire, schema: recoveredSchema) else { return nil }
         return data
     }
 

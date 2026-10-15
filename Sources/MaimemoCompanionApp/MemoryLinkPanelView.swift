@@ -5,19 +5,41 @@ import WordMemoryCore
 struct MemoryLinkPanelView: View {
     @ObservedObject var model: CompanionViewModel
     @State private var showMore = false
+    @State private var showAdjustments = false
+    @State private var presentation: LearningPresentation = .text
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var presentationSelection
+
+    private enum LearningPresentation: String, CaseIterable {
+        case text, image
+        var label: String { self == .text ? "文字记法" : "图像记法" }
+        var symbol: String { self == .text ? "text.alignleft" : "photo" }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 20) {
             if !model.isMemoryRevealed {
-                Text("先自己想一想").font(.custom("Songti SC", size: 18))
-                Text("轻触学习区域，查看线索").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("先自己想一想").font(.custom("Songti SC", size: 18))
+                    Text("轻触学习区域，查看线索").font(.caption).foregroundStyle(.secondary)
+                }.padding(.vertical, 3)
             } else if let card = model.memoryCard {
-                cardContent(card)
+                presentationPicker
+                Group {
+                    if presentation == .text { textMethod(card) }
+                    else { illustrationArea(card) }
+                }
+                .transition(.opacity)
+                sharedMeaning(card)
                 revisionControls
-                illustrationArea
             } else if let hint = model.quickHint {
                 Text("临时线索 · 完整卡片尚未校验保存").font(.caption2).foregroundStyle(.secondary)
-                anchorContent(hint.anchor)
+                if let link = hint.wordLink {
+                    Text(link.source).font(.system(size: 24, design: .serif)).textSelection(.enabled)
+                    Text(link.cue).font(.custom("Songti SC", size: 15)).fixedSize(horizontal: false, vertical: true)
+                    Text(link.connection).font(.custom("Songti SC", size: 14)).fixedSize(horizontal: false, vertical: true)
+                    recallLine(link.recall)
+                } else { anchorContent(hint.anchor) }
                 coreMeaning(hint.coreConcept)
                 if let branch = hint.branch { contextLine(branch) }
                 if model.isGenerating { progressLine }
@@ -28,7 +50,7 @@ struct MemoryLinkPanelView: View {
                 if model.memoryError == nil {
                     Button(model.modelIsConfigured ? "生成线索 · 可能计费" : "配置模型") {
                         if model.modelIsConfigured { model.generateMemoryCard() } else { model.openSettings() }
-                    }.buttonStyle(.bordered)
+                    }.memoryGlassButtonStyle(prominent: true)
                 }
             }
             if model.isMemoryRevealed, let error = model.memoryError {
@@ -43,24 +65,86 @@ struct MemoryLinkPanelView: View {
                             .font(.caption2).foregroundStyle(.secondary)
                         if model.canReparseCurrentResponse {
                             Button("重新解析已接收内容 · 不调用模型") { model.reparseReceivedResponse() }
-                                .buttonStyle(.bordered).font(.caption)
+                                .memoryGlassButtonStyle()
                         }
                     }
                     Button(model.currentFailedResponse == nil ? "重新生成 · 可能计费" : "按上次请求重新生成 · 可能计费") {
                         model.retrySelectedAnchor()
-                    }.buttonStyle(.bordered).font(.caption)
+                    }.memoryGlassButtonStyle()
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
-        .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.12)))
+        .memoryGlass(cornerRadius: 25)
+        .onChange(of: model.snapshot.word) { _ in resetPresentation() }
+        .onChange(of: model.isMemoryRevealed) { revealed in if !revealed { resetPresentation() } }
     }
 
-    @ViewBuilder private func cardContent(_ card: MemoryCard) -> some View {
-        if let anchor = card.anchor { anchorContent(anchor) }
-        coreMeaning(card.coreConcept)
+    private func resetPresentation() {
+        presentation = .text
+        showMore = false
+        showAdjustments = false
+    }
+
+    private var presentationPicker: some View {
+        HStack(spacing: 4) {
+            ForEach(LearningPresentation.allCases, id: \.self) { item in
+                Button {
+                    withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { presentation = item }
+                } label: {
+                    Label(item.label, systemImage: item.symbol)
+                        .font(.custom("Songti SC", size: 13))
+                        .foregroundStyle(.white.opacity(presentation == item ? 0.96 : 0.52))
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .background {
+                            if presentation == item {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .fill(.white.opacity(0.10))
+                                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(.white.opacity(0.14)))
+                                    .matchedGeometryEffect(id: "presentation", in: presentationSelection)
+                            }
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 11))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(presentation == item ? [.isSelected] : [])
+                .accessibilityHint(item == .image ? "只切换展示；生成图片需另行点击" : "查看原词如何连接到意思")
+            }
+        }
+        .padding(4)
+        .background(.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).strokeBorder(.white.opacity(0.055)))
+    }
+
+    @ViewBuilder private func textMethod(_ card: MemoryCard) -> some View {
+        if let link = card.wordLink {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel(card.anchor?.kind.label ?? "从原词认出意思", symbol: "link")
+                Text(link.source).font(.system(size: 24, weight: .regular, design: .serif))
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Label(link.cue, systemImage: "arrow.turn.down.right")
+                    .font(.custom("Songti SC", size: 15)).fixedSize(horizontal: false, vertical: true)
+                Text(link.connection).font(.custom("Songti SC", size: 14)).foregroundStyle(.white.opacity(0.79))
+                    .fixedSize(horizontal: false, vertical: true)
+                recallLine(link.recall)
+            }.padding(13).frame(maxWidth: .infinity, alignment: .leading)
+                .memoryGlass(cornerRadius: 16, prominence: .subtle)
+            if card.anchor?.kind == .sound || card.anchor?.kind == .hybrid {
+                Text("声音联想是助记，不是标准发音或词源").font(.caption2).foregroundStyle(.secondary)
+            }
+            if let anchor = card.anchor {
+                DisclosureGroup("展开这条联想") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(anchor.cue).font(.custom("Songti SC", size: 14))
+                        Text(anchor.explanation).font(.custom("Songti SC", size: 13)).foregroundStyle(.white.opacity(0.72))
+                    }.fixedSize(horizontal: false, vertical: true).padding(.top, 7)
+                }.font(.custom("Songti SC", size: 12))
+            }
+        } else {
+            legacyUpgrade("这份旧记法尚未记录原词联系")
+            if let anchor = card.anchor { anchorContent(anchor) }
+        }
         if let analysis = card.analysis {
             if !analysis.parts.isEmpty {
                 Text(analysis.parts.map(\.text).joined(separator: " + "))
@@ -82,7 +166,7 @@ struct MemoryLinkPanelView: View {
                     Text("可尝试：\(suggestion)").font(.custom("Songti SC", size: 12)).foregroundStyle(.secondary)
                 }
             }
-            DisclosureGroup("为什么这样拆／相关词") {
+            DisclosureGroup("拆分依据与相关词") {
                 VStack(alignment: .leading, spacing: 9) {
                     Text(analysis.relations.map(\.label).joined(separator: " · "))
                     if let lemma = analysis.lemma { Text("原形参考：\(lemma)") }
@@ -95,7 +179,14 @@ struct MemoryLinkPanelView: View {
                 }.font(.custom("Songti SC", size: 12)).padding(.top, 8)
             }.font(.custom("Songti SC", size: 12))
         }
-        if let caveat = card.caveat { Text(caveat).font(.caption).foregroundStyle(.secondary) }
+        if model.isGenerating { progressLine }
+    }
+
+    @ViewBuilder private func sharedMeaning(_ card: MemoryCard) -> some View {
+        coreMeaning(card.coreConcept)
+        if let caveat = card.caveat {
+            Text(caveat).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
         if card.branches.count > 1 {
             Menu("当前用法：\(model.selectedBranch?.partOfSpeech ?? "选择")") {
                 ForEach(card.branches) { branch in
@@ -106,21 +197,22 @@ struct MemoryLinkPanelView: View {
         if let branch = model.selectedBranch { contextLine(branch) }
         DisclosureGroup("用一个新句试试") {
             VStack(alignment: .leading, spacing: 9) {
-                Text(card.transferCheck.sentence).font(.system(size: 14, design: .serif))
-                Button(model.showAnswer ? "隐藏答案" : "查看答案") { model.showAnswer.toggle() }
+                Text(card.transferCheck.sentence).font(.system(size: 14, design: .serif)).fixedSize(horizontal: false, vertical: true)
+                Button(model.showAnswer ? "隐藏答案" : "查看答案") {
+                    withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { model.showAnswer.toggle() }
+                }.memoryGlassButtonStyle()
                 if model.showAnswer {
                     Text(card.transferCheck.answer)
                     Text(card.transferCheck.clue).foregroundStyle(.secondary)
                 }
             }.font(.custom("Songti SC", size: 12)).padding(.top, 7)
         }.font(.custom("Songti SC", size: 12))
-        if model.isGenerating { progressLine }
     }
 
     private func anchorContent(_ anchor: MemoryAnchor) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(anchor.kind.label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-            Text(anchor.cue).font(.custom("Songti SC", size: 21)).fixedSize(horizontal: false, vertical: true)
+            Text(anchor.cue).font(.custom("Songti SC", size: 21)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             Text(anchor.explanation).font(.custom("Songti SC", size: 14)).foregroundStyle(.white.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
             if anchor.kind == .sound || anchor.kind == .hybrid {
@@ -142,55 +234,83 @@ struct MemoryLinkPanelView: View {
                 Button("下一条") { model.moveHistory(by: 1) }
                     .disabled(model.isGenerating || !model.cardHistory.canMove(by: 1))
             }.font(.custom("Songti SC", size: 12)).buttonStyle(.plain)
-            Text("换记法").font(.custom("Songti SC", size: 14))
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                ForEach(MemoryPreset.common) { preset in
-                    Button(preset.label) { model.regenerate(preset) }
-                        .font(.custom("Songti SC", size: 12)).frame(maxWidth: .infinity, minHeight: 28)
-                        .buttonStyle(.bordered).disabled(model.isGenerating)
-                }
-            }
-            Text("点击即重新生成一次，可能消耗模型用量").font(.caption2).foregroundStyle(.secondary)
-            DisclosureGroup("更多调整", isExpanded: $showMore) {
+            DisclosureGroup("换个记法", isExpanded: $showAdjustments) {
                 VStack(alignment: .leading, spacing: 9) {
-                    ForEach(MemoryPreset.allCases.filter { !MemoryPreset.common.contains($0) }) { preset in
-                        Button(preset.label) { model.regenerate(preset) }.disabled(model.isGenerating)
-                    }
-                    Menu("切回已有记法 · 不生成") {
-                        ForEach(MemoryAnchorKind.allCases.filter { model.memoryCard?.anchor(for: $0) != nil }, id: \.self) { kind in
-                            Button(kind.label) { model.chooseAnchor(kind, generateImage: false) }
+                    Text("选择后重新生成一次，可能消耗模型用量").font(.caption2).foregroundStyle(.secondary)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        ForEach(MemoryPreset.common) { preset in
+                            Button { model.regenerate(preset) } label: {
+                                Text(preset.label).frame(maxWidth: .infinity)
+                            }.memoryGlassButtonStyle().disabled(model.isGenerating)
                         }
-                    }.disabled(model.isGenerating)
-                    Button("字母插画 · 准备并生图，可能计费") { model.chooseAnchor(.letterIllustration) }
-                        .disabled(model.isGenerating)
-                }.font(.custom("Songti SC", size: 12)).padding(.top, 8)
-            }.font(.custom("Songti SC", size: 12))
-            if model.needsBranchSelection {
-                Text("先选择要补的词性和义项，再点击“只补这个用法”").font(.caption).foregroundStyle(.orange)
-            }
-            HStack(spacing: 6) {
-                ForEach(RevisionReasonTag.allCases, id: \.self) { tag in
-                    Button(tag.label) {
-                        if model.reasonTags.contains(tag) { model.reasonTags.remove(tag) }
-                        else { model.reasonTags.insert(tag) }
                     }
-                    .font(.custom("Songti SC", size: 10)).buttonStyle(.plain)
-                    .padding(6).background(model.reasonTags.contains(tag) ? .white.opacity(0.18) : .white.opacity(0.055), in: Capsule())
-                    .disabled(model.isGenerating)
-                }
-            }
-            TextField("额外补充（可不填）", text: $model.learnerNote)
-                .font(.custom("Songti SC", size: 12)).textFieldStyle(.roundedBorder).disabled(model.isGenerating)
+                    DisclosureGroup("更多调整", isExpanded: $showMore) {
+                        VStack(alignment: .leading, spacing: 9) {
+                            ForEach(MemoryPreset.allCases.filter { !MemoryPreset.common.contains($0) }) { preset in
+                                Button(preset.label) { model.regenerate(preset) }.disabled(model.isGenerating)
+                            }
+                            Menu("切回已有版本 · 不生成") {
+                                ForEach(Array(model.cardHistory.cards.enumerated()), id: \.offset) { index, card in
+                                    Button("第 \(index + 1) 条 · \(card.anchor?.kind.label ?? "已有线索")") { model.selectHistoryVersion(at: index) }
+                                }
+                            }.disabled(model.isGenerating)
+                        }
+                        .font(.custom("Songti SC", size: 12)).padding(.top, 8)
+                    }
+                    if model.needsBranchSelection {
+                        Text("先选择要补的词性和义项，再点击“只补这个用法”").font(.caption).foregroundStyle(.orange)
+                    }
+                    HStack(spacing: 6) {
+                        ForEach(RevisionReasonTag.allCases, id: \.self) { tag in
+                            Button(tag.label) {
+                                if model.reasonTags.contains(tag) { model.reasonTags.remove(tag) }
+                                else { model.reasonTags.insert(tag) }
+                            }
+                            .font(.custom("Songti SC", size: 10)).buttonStyle(.plain)
+                            .padding(6).background(model.reasonTags.contains(tag) ? .white.opacity(0.18) : .white.opacity(0.055), in: Capsule())
+                            .disabled(model.isGenerating)
+                        }
+                    }
+                    TextField("额外补充（可不填）", text: $model.learnerNote)
+                        .font(.custom("Songti SC", size: 12)).textFieldStyle(.roundedBorder).disabled(model.isGenerating)
+                }.padding(.top, 10)
+            }.font(.custom("Songti SC", size: 13))
         }
     }
 
-    private var illustrationArea: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Divider()
+    private func illustrationArea(_ card: MemoryCard) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
             if let url = model.memoryImageURL, let image = NSImage(contentsOf: url) {
                 Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 14)).accessibilityLabel("当前版本的记忆插画")
-            } else if let task = model.currentImageTask {
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.1)))
+                    .accessibilityLabel("\(card.word) 的记忆插画；下方有画面对应解释")
+            }
+            if let plan = card.illustration {
+                VStack(alignment: .leading, spacing: 9) {
+                    sectionLabel(model.memoryImageURL == nil ? "这张图会怎样记住原词" : "画面怎样对应原词", symbol: "sparkle")
+                    Text(plan.scene).font(.custom("Songti SC", size: 16)).fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(plan.mappings.enumerated()), id: \.offset) { _, mapping in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                Text(mapping.source).font(.system(size: 15, weight: .medium, design: .serif)).textSelection(.enabled)
+                                Image(systemName: "arrow.right").font(.system(size: 10)).foregroundStyle(.secondary)
+                                Text(mapping.visual).font(.custom("Songti SC", size: 13))
+                            }
+                            Text(mapping.meaning).font(.custom("Songti SC", size: 12)).foregroundStyle(.white.opacity(0.67))
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    }
+                    Text(plan.explanation).font(.custom("Songti SC", size: 14)).foregroundStyle(.white.opacity(0.79))
+                        .fixedSize(horizontal: false, vertical: true)
+                    recallLine(plan.recall)
+                }
+            } else {
+                legacyUpgrade(model.memoryImageURL == nil ? "这份旧记法尚未记录图片映射" : "这是旧版插画，尚未记录对应的原词映射")
+            }
+            if let task = model.currentImageTask, task.state != .completed {
                 HStack {
                     if task.state.isActive { ProgressView().controlSize(.small) }
                     Text(task.state.label).font(.custom("Songti SC", size: 12))
@@ -202,42 +322,67 @@ struct MemoryLinkPanelView: View {
                         Button("检查图片 Key 设置") { model.openSettings() }.font(.caption)
                     }
                     if model.imageTasks.canResume(task) {
-                        Button("继续下载／保存原结果") { model.resumeImageResult(task) }.buttonStyle(.bordered)
-                    } else if !task.state.isActive {
+                        Button("继续下载／保存原结果") { model.resumeImageResult(task) }.memoryGlassButtonStyle()
+                    } else if !task.state.isActive, card.illustration != nil {
                         Button(failure.isPaymentRequired ? "处理后重新提交 · 可能计费" : "重新生成一张 · 可能再次计费") { model.generateCurrentIllustration(newGeneration: true) }
-                            .buttonStyle(.bordered).font(.caption)
+                            .memoryGlassButtonStyle()
                     }
                 }
-            } else {
+            } else if model.memoryImageURL == nil, card.illustration != nil {
                 Button("生成插画 · 可能计费") { model.generateCurrentIllustration() }
-                    .buttonStyle(.bordered).font(.custom("Songti SC", size: 12))
+                    .memoryGlassButtonStyle(prominent: true)
             }
-            if model.imageGenerator == nil {
+            if model.imageGenerator == nil, card.illustration != nil {
                 Button("配置图片服务") { model.openSettings() }.font(.caption)
             }
             if model.currentImageTask == nil, let error = model.imageError {
                 Text(error).font(.caption).foregroundStyle(.orange)
             }
-            Text("切词、收起或切应用后继续；文字仍可阅读与重做")
-                .font(.caption2).foregroundStyle(.secondary)
+            if card.illustration != nil {
+                Text("生成需另行点击；开始后可切词、收起或切换记法")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if model.isGenerating { progressLine }
         }
+    }
+
+    private func legacyUpgrade(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(message).font(.custom("Songti SC", size: 13)).foregroundStyle(.white.opacity(0.66))
+            Button("补齐原词联系 · 可能计费") { model.upgradeCurrentLearningLink() }
+                .memoryGlassButtonStyle().disabled(model.isGenerating)
+        }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func sectionLabel(_ title: String, symbol: String) -> some View {
+        Label(title, systemImage: symbol).font(.caption2.weight(.medium)).foregroundStyle(.white.opacity(0.53))
+    }
+
+    private func recallLine(_ recall: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("下次看到原词").font(.caption2).foregroundStyle(.white.opacity(0.48))
+            Text(recall).font(.custom("Songti SC", size: 13)).foregroundStyle(.white.opacity(0.88))
+                .fixedSize(horizontal: false, vertical: true)
+        }.padding(.top, 3)
     }
 
     private func coreMeaning(_ concept: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Divider()
-            Text("抓住这个意思").font(.caption).foregroundStyle(.secondary)
+            Text("抓住共同的意思").font(.caption).foregroundStyle(.secondary)
             Text(concept).font(.custom("Songti SC", size: 17)).fixedSize(horizontal: false, vertical: true)
         }
     }
     private func contextLine(_ branch: MeaningBranch) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(branch.context).font(.system(size: 15, design: .serif)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
             Text("\(branch.partOfSpeech) · 在这句里：\(branch.chineseMeaning)。\(branch.explanation)")
                 .font(.custom("Songti SC", size: 13)).foregroundStyle(.white.opacity(0.68))
                 .fixedSize(horizontal: false, vertical: true)
         }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+            .memoryGlass(cornerRadius: 16, prominence: .subtle)
     }
     private var progressLine: some View {
         HStack(spacing: 8) {

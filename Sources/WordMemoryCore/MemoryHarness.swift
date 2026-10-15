@@ -33,13 +33,15 @@ public struct MemoryRequest: Codable, Sendable {
     public let focusBranchID: String?
     public let requestID: UUID
     public let previousUserNote: String
+    /// Opt in for new generations; absent in legacy archives and fixtures.
+    public let requiresLearningLink: Bool?
     public var requiredAnchorKind: MemoryAnchorKind? { strategy == nil ? preferredAnchorKind : strategy?.anchorKind }
     public var allowedAnchorKinds: [MemoryAnchorKind] {
         if let kind = requiredAnchorKind { return [kind] }
         return MemoryAnchorKind.allCases.filter { $0 != .letterIllustration }
     }
 
-    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil, preferredAnchorKind: MemoryAnchorKind = .sound, isAnchorRevision: Bool = false, strategy: MemoryStrategy? = nil, preset: MemoryPreset? = nil, reasonTags: [RevisionReasonTag] = [], visibleContext: String? = nil, focusBranchID: String? = nil, requestID: UUID = UUID(), previousUserNote: String = "") {
+    public init(word: String, learnerNote: String = "", previousReason: ForgetReason? = nil, preferredMethod: MemoryMethodKind? = nil, previousMethod: String? = nil, existingCard: MemoryCard? = nil, focusMeaningKey: String? = nil, preferredAnchorKind: MemoryAnchorKind = .sound, isAnchorRevision: Bool = false, strategy: MemoryStrategy? = nil, preset: MemoryPreset? = nil, reasonTags: [RevisionReasonTag] = [], visibleContext: String? = nil, focusBranchID: String? = nil, requestID: UUID = UUID(), previousUserNote: String = "", requiresLearningLink: Bool? = nil) {
         self.word = word
         self.learnerNote = learnerNote
         self.previousReason = previousReason
@@ -52,13 +54,14 @@ public struct MemoryRequest: Codable, Sendable {
         self.strategy = strategy; self.preset = preset; self.reasonTags = reasonTags
         self.visibleContext = visibleContext; self.focusBranchID = focusBranchID; self.requestID = requestID
         self.previousUserNote = previousUserNote
+        self.requiresLearningLink = requiresLearningLink
     }
 
-    public func renewed() -> MemoryRequest {
+    public func renewed(requiresLearningLink: Bool? = nil) -> MemoryRequest {
         MemoryRequest(word: word, learnerNote: learnerNote, previousReason: previousReason, preferredMethod: preferredMethod,
             previousMethod: previousMethod, existingCard: existingCard, focusMeaningKey: focusMeaningKey,
             preferredAnchorKind: preferredAnchorKind, isAnchorRevision: isAnchorRevision, strategy: strategy, preset: preset,
-            reasonTags: reasonTags, visibleContext: visibleContext, focusBranchID: focusBranchID, previousUserNote: previousUserNote)
+            reasonTags: reasonTags, visibleContext: visibleContext, focusBranchID: focusBranchID, previousUserNote: previousUserNote, requiresLearningLink: requiresLearningLink ?? self.requiresLearningLink)
     }
 
     public static func revisingSound(_ card: MemoryCard, reason: String?) -> MemoryRequest {
@@ -77,6 +80,7 @@ public enum MemoryHarness {
     2. 智能策略 auto 先检查词形变化，再检查可靠构词，再评估熟词切块与声音；按可靠性、熟悉度（未知时不推断）、负担与语义关联选一种或简短组合，不按长短硬分。用户明确指定的方法优先，anchor.kind 严格遵守契约；不适合就在 analysis.notSuitableReason 说明具体原因，alternativeSuggestion 给简短建议，保持指定类型，不伪装成另一方法，不追加请求。sound 不冒充标准发音或词源；没有自然谐音就坦白说明。letterIllustration 画准确字母与核心关系，imagePrompt 为非空英文并含准确拼写。
     屈折 inflection、派生 derivation、复合 compound、个人拆分 mnemonicSplit 必须分开。词根不一定能独立使用；陌生词根不能仅凭字母重合认定。部件 text 按原词顺序覆盖全部准确拼写；不要输出字符位置，不写 -hood 或 un- 这样的词缀记号；熟词借音、字母变化必须在 explanation 明说，不能漏字、加字或调序。任意字母可以 meaning=null。所有模型语言分析 evidence=modelUnverified，助记 evidence=mnemonic；结构校验不等于词典核验。默认只拆一层，最多三个常用相关词，屈折和派生分开，不能自动认为词族已会。-s 与词形还原有歧义时不强行选唯一原形。
     小型参考样例：helped 是 help 的语法变化；helpful/helpless 是派生的形容词；helpfulness 优先拆 helpful + -ness（名词性质），而不是堆叠每个部件。词缀可能提示词性，不保证机械推出完整意思。拼写不变的词性变化仍看句法；involvement 是名词，中文“参与／卷入”不能当作英文动词证据。
+    不论使用哪一种记法，都必须从当前英文原词中可识别的线索出发，再解释怎样连到中文含义。只给“限时有效”“拿尺子量”等中文释义或场景，再在前面贴上英文单词，不构成记忆联系。原词、可识别线索、连接理由和回忆步骤必须对应；不要为了有联系而伪造词源、拆分或发音。没有可靠构词时可以用标明为助记的词形、声音，或带原词和可观察搭配的语境，说明它们为何能触发回忆。
     3. 只选当前最有帮助的一个常见语境分支，给简短英文句子、可观察信号、当句中文意思，并说明核心关系如何在这里落地；若直观名词义已由背词软件展示，而这个词还有常见抽象动词／形容词义，优先用后者检验核心关系。不要堆叠中文同义词，也不要替代背词软件的词典。
     4. 其他记忆方法只作为内部候选，不在主界面罗列；谐音、拆字或画面联想不能冒充语言事实。
     5. 给一个自编、简短、纯英文的新句用于内部迁移检查。answer 和 clue 单独提供。句子不能只是前面情境句换几个无关词。
@@ -209,10 +213,11 @@ public enum MemoryHarness {
         }) else {
             throw MemoryHarnessError.invalidResponse("把个人联想误标为语言事实")
         }
-        return card
+        return card.replacingAnchor(card.anchor(for: anchor.kind)!)
     }
 
     public static func validate(_ card: MemoryCard, for request: MemoryRequest) throws {
+        if request.requiresLearningLink == true || card.wordLink != nil || card.illustration != nil { try validateLearningLink(card) }
         guard request.strategy == nil || card.word == request.word else {
             throw MemoryHarnessError.invalidResponse("屏幕词形未准确保留")
         }
@@ -242,6 +247,52 @@ public enum MemoryHarness {
             guard unaffected.allSatisfy({ card.branches.contains($0) }) else {
                 throw MemoryHarnessError.invalidResponse("其他分支被修改或丢失")
             }
+        }
+    }
+
+    private static func hasLearningText(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private static func hasLearningChinese(_ value: String) -> Bool {
+        value.range(of: "[\\p{Han}]", options: .regularExpression) != nil
+    }
+    private static func isLearningSource(_ source: String, word: String) -> Bool {
+        hasLearningText(source) && source == source.trimmingCharacters(in: .whitespacesAndNewlines)
+            && source.range(of: "[A-Za-z]", options: .regularExpression) != nil
+            && word.range(of: source, options: .literal) != nil
+    }
+
+    /// Shared by complete-card validation and provisional stream hints.
+    private static func validateWordLink(_ candidate: MemoryWordLink?, word: String, coreConcept: String) throws {
+        guard let link = candidate,
+              [link.source, link.cue, link.connection, link.recall].allSatisfy(hasLearningText),
+              isLearningSource(link.source, word: word) else {
+            throw MemoryHarnessError.invalidResponse("缺少原词→线索→含义的记忆联系，source 必须能在原词准确定位")
+        }
+        // A bare whole-word translation equation provides no recoverable English cue.
+        let translationEquation = "^\\s*" + NSRegularExpression.escapedPattern(for: word) + "\\s*[=＝]\\s*[^A-Za-z]+$"
+        guard link.cue.range(of: translationEquation, options: [.regularExpression, .caseInsensitive]) == nil,
+              link.cue.range(of: link.source, options: .literal) != nil,
+              link.cue != link.source, link.cue != coreConcept,
+              link.connection.range(of: link.source, options: .literal) != nil,
+              hasLearningChinese(link.connection), link.connection != coreConcept, link.connection != link.cue,
+              promptContainsWord(link.recall, word: word), hasLearningChinese(link.recall) else {
+            throw MemoryHarnessError.invalidResponse("记忆线索必须说明原词中的可识别线索怎样连接中文含义，并给出含原词的回忆路径；不能只有中文释义")
+        }
+    }
+
+    /// Checks observable contract boundaries only; semantic usefulness still needs learner feedback.
+    private static func validateLearningLink(_ card: MemoryCard) throws {
+        try validateWordLink(card.wordLink, word: card.word, coreConcept: card.coreConcept)
+        guard let plan = card.illustration,
+              [plan.scene, plan.explanation, plan.recall].allSatisfy(hasLearningText),
+              (1...3).contains(plan.mappings.count),
+              plan.mappings.allSatisfy({ isLearningSource($0.source, word: card.word) && hasLearningText($0.visual) && hasLearningChinese($0.meaning) && $0.visual != $0.source }),
+              Set(plan.mappings.map(\.source)).count == plan.mappings.count,
+              promptContainsWord(plan.scene, word: card.word),
+              promptContainsWord(plan.recall, word: card.word), hasLearningChinese(plan.recall), hasLearningChinese(plan.explanation),
+              plan.mappings.allSatisfy({ plan.explanation.range(of: $0.source, options: .literal) != nil }) else {
+            throw MemoryHarnessError.invalidResponse("图片计划必须包含原词字母、1—3 个词形与含义的具体映射、逐项画面解释和含原词的回忆路径")
         }
     }
 
@@ -278,7 +329,7 @@ public enum MemoryHarness {
     }
 
     /// Extracts only complete JSON values from a streaming prefix. A partial card is not trusted or saved.
-    public static func quickHint(from prefix: String, expectedWord: String) -> QuickMemoryHint? {
+    public static func quickHint(from prefix: String, expectedWord: String, requiresLearningLink: Bool = false) -> QuickMemoryHint? {
         let bytes = Array(prefix.utf8)
         guard let wordStart = topLevelValueStart("word", in: bytes),
               let word = decodedString(at: wordStart, in: bytes),
@@ -298,6 +349,16 @@ public enum MemoryHarness {
             return nil
         }
 
+        var wordLink: MemoryWordLink?
+        if let linkStart = topLevelValueStart("wordLink", in: bytes),
+           linkStart < bytes.count, bytes[linkStart] == 123,
+           let linkEnd = completeObjectEnd(at: linkStart, in: bytes),
+           let decoded = try? JSONDecoder().decode(MemoryWordLink.self, from: Data(bytes[linkStart...linkEnd])),
+           (try? validateWordLink(decoded, word: word, coreConcept: concept)) != nil {
+            wordLink = decoded
+        }
+        guard !requiresLearningLink || wordLink != nil else { return nil }
+
         var branch: MeaningBranch?
         if let branchesStart = topLevelValueStart("branches", in: bytes),
            branchesStart < bytes.count, bytes[branchesStart] == 91 {
@@ -308,7 +369,7 @@ public enum MemoryHarness {
                 branch = try? JSONDecoder().decode(MeaningBranch.self, from: Data(bytes[position...end]))
             }
         }
-        return QuickMemoryHint(word: word, coreConcept: concept, anchor: anchor, branch: branch)
+        return QuickMemoryHint(word: word, coreConcept: concept, anchor: anchor, branch: branch, wordLink: wordLink)
     }
 
     private static func topLevelValueStart(_ name: String, in bytes: [UInt8]) -> Int? {

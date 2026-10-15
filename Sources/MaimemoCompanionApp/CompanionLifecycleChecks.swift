@@ -14,13 +14,20 @@ struct CompanionLifecycleChecks {
     static func notNil<T>(_ value: T?) throws { try yes(value != nil) }
     static func run() async throws {
         let checks = Self()
-        try await checks.testImagesSurviveWordSwitchSettingsAndCollapseWithoutRevealing()
-        try await checks.testOldImageCannotOverwriteNewTextVersionAndHistoryIsLocal()
-        try await checks.testCapturedTextRequestSavesToOriginalWordWhenPageChanges()
-        try await checks.testFailedNewCardKeepsOriginalAndBranchPresetNeedsSelection()
-        try await checks.testFailureReturnAndCachedAnchorNeverSubmit()
-        try checks.testLocalReceivedResponseRecovery()
-        try await checks.testImagePaymentFailureDoesNotResubmit()
+        let cases: [(String, () async throws -> Void)] = [
+            ("background image survival", { try await checks.testImagesSurviveWordSwitchSettingsAndCollapseWithoutRevealing() }),
+            ("image and text versions", { try await checks.testOldImageCannotOverwriteNewTextVersionAndHistoryIsLocal() }),
+            ("captured word request", { try await checks.testCapturedTextRequestSavesToOriginalWordWhenPageChanges() }),
+            ("failed card preservation", { try await checks.testFailedNewCardKeepsOriginalAndBranchPresetNeedsSelection() }),
+            ("cached anchor zero requests", { try await checks.testFailureReturnAndCachedAnchorNeverSubmit() }),
+            ("local response recovery", { try checks.testLocalReceivedResponseRecovery() }),
+            ("payment failure", { try await checks.testImagePaymentFailureDoesNotResubmit() }),
+            ("legacy learning-link upgrade", { try await checks.testLegacyUpgradeOnlyPreparesTextAndPlan() })
+        ]
+        for (name, check) in cases {
+            do { try await check() }
+            catch { throw Failure(message: "\(name): \(error)") }
+        }
         print("companion-lifecycle-check: 切词、设置、收起、重复点击、旧图与新版本隔离、历史零请求、原词保存和失败保护通过")
     }
     static func previewModel(imageGenerator: (any MemoryImageGenerator)? = nil) -> CompanionViewModel {
@@ -40,6 +47,7 @@ struct CompanionLifecycleChecks {
                 ["text": "ness", "start": 7, "end": 11, "kind": "suffix", "meaning": "性质，构成名词", "relation": "derivation", "evidence": "modelUnverified"]],
             "relatedWords": [["word": "helpful", "partOfSpeech": "adjective", "meaning": "有帮助的", "relation": "derivation", "evidence": "modelUnverified"]],
             "notSuitableReason": NSNull(), "alternativeSuggestion": NSNull()]
+        checks.addLearningFields(to: &object, word: "helpfulness")
         let data = try! JSONSerialization.data(withJSONObject: object)
         let card = try! JSONDecoder().decode(MemoryCard.self, from: data)
         let store = MemoryStore(fileURL: directory.appendingPathComponent("memory.json")); try! store.save(card)
@@ -102,7 +110,7 @@ struct CompanionLifecycleChecks {
     func testImagesSurviveWordSwitchSettingsAndCollapseWithoutRevealing() async throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         let store = MemoryStore(fileURL: directory.appendingPathComponent("memory.json"))
-        for word in ["help", "state", "involvement"] { try store.save(card(word)) }
+        for word in ["help", "state", "involvement"] { try store.save(linkedCard(word)) }
         let generator = DelayedImage(data: try png())
         let model = CompanionViewModel(memoryStore: store, imageStore: MemoryImageStore(directoryURL: directory.appendingPathComponent("images")), imageGenerator: generator, checkStoredKeys: false)
         model.applySnapshot(snapshot("help")); model.revealMemoryHelp()
@@ -126,7 +134,7 @@ struct CompanionLifecycleChecks {
 
     func testOldImageCannotOverwriteNewTextVersionAndHistoryIsLocal() async throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
-        let original = card("help")
+        let original = linkedCard("help")
         let store = MemoryStore(fileURL: directory.appendingPathComponent("memory.json")); try store.save(original)
         Fixture.configure(try resultJSON("help", cue: "新的简短场景"))
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [Fixture.self]
@@ -148,6 +156,14 @@ struct CompanionLifecycleChecks {
         try Self.equal(Fixture.count, 1)
         let imageCount = await generator.count
         try Self.equal(imageCount, 1)
+        let newer = model.memoryCard
+        model.selectHistoryVersion(at: 0)
+        try Self.equal(model.memoryCard, original)
+        model.selectHistoryVersion(at: 1)
+        try Self.equal(model.memoryCard, newer)
+        model.selectHistoryVersion(at: 99)
+        try Self.equal(model.memoryCard, newer)
+        try Self.equal(Fixture.count, 1); try Self.equal(await generator.count, 1)
     }
 
     func testCapturedTextRequestSavesToOriginalWordWhenPageChanges() async throws {
@@ -247,6 +263,44 @@ struct CompanionLifecycleChecks {
         try Self.no(model.canReparseCurrentResponse)
     }
 
+    func testLegacyUpgradeOnlyPreparesTextAndPlan() async throws {
+        let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MemoryStore(fileURL: directory.appendingPathComponent("memory.json"))
+        let oldCard = card("measure"); try store.save(oldCard)
+        Fixture.configure(try resultJSON("measure", cue: "原词字母参与画面中的测量动作"))
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [Fixture.self]
+        let session = URLSession(configuration: config); defer { session.invalidateAndCancel() }
+        let generator = DelayedImage(data: try png())
+        let model = CompanionViewModel(memoryStore: store, imageStore: MemoryImageStore(directoryURL: directory.appendingPathComponent("images")),
+            imageGenerator: generator, modelClient: OpenAICompatibleClient(session: session),
+            modelConfiguration: ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!, model: "fixture", apiKey: "fixture-only"), checkStoredKeys: false)
+        model.applySnapshot(snapshot("measure")); model.revealMemoryHelp()
+        model.generateCurrentIllustration()
+        try Self.notNil(model.imageError)
+        try Self.equal(Fixture.count, 0); try Self.equal(await generator.count, 0)
+        try Self.yes(model.imageTasks.records.isEmpty)
+        model.upgradeCurrentLearningLink(); model.upgradeCurrentLearningLink()
+        try await waitFor { !model.isGenerating }
+        try Self.equal(Fixture.count, 1); try Self.equal(await generator.count, 0)
+        guard model.memoryCard?.wordLink != nil, model.memoryCard?.illustration != nil else {
+            throw Failure(message: "upgrade failed: \(model.memoryError ?? "missing learning fields")")
+        }
+        model.generateCurrentIllustration(); model.generateCurrentIllustration()
+        try await waitFor { model.currentImageTask?.state == .completed }
+        try Self.equal(await generator.count, 1); try Self.equal(Fixture.count, 1)
+        // A later response missing the new learning content cannot replace this complete card.
+        let complete = model.memoryCard
+        var missing = try JSONSerialization.jsonObject(with: JSONEncoder().encode(card("measure"))) as! [String: Any]
+        missing["caveat"] = NSNull()
+        missing["anchor"] = ["kind": "context", "cue": "只有中文意思", "explanation": "只有释义", "imagePrompt": NSNull()]
+        missing["analysis"] = ["surfaceWord": "measure", "relations": ["none"], "core": "核心", "explanation": "没有原词线索", "parts": [], "relatedWords": []]
+        Fixture.configure(String(decoding: try JSONSerialization.data(withJSONObject: missing), as: UTF8.self))
+        model.upgradeCurrentLearningLink()
+        try await waitFor { !model.isGenerating }
+        try Self.equal(Fixture.count, 1); try Self.equal(model.memoryCard, complete)
+        try Self.notNil(model.memoryError); try Self.equal(await generator.count, 1)
+    }
+
     func card(_ word: String, multiple: Bool = false) -> MemoryCard {
         let noun = MeaningBranch(partOfSpeech: "noun", meaningKey: "core", chineseMeaning: "核心用法", context: "They offered help.", signal: "名词位置", explanation: "示例")
         let verb = MeaningBranch(partOfSpeech: "verb", meaningKey: "verb", chineseMeaning: "说明", context: "They state a reason.", signal: "谓语位置", explanation: "动词用法")
@@ -261,7 +315,20 @@ struct CompanionLifecycleChecks {
         object["anchor"] = ["kind": "context", "cue": cue, "explanation": "建议生活画面", "imagePrompt": NSNull()]
         object["analysis"] = ["surfaceWord": word, "lemma": NSNull(), "relations": ["none"], "core": "核心", "change": NSNull(),
             "explanation": "不硬拆", "parts": [], "relatedWords": [], "notSuitableReason": NSNull(), "alternativeSuggestion": NSNull()]
+        addLearningFields(to: &object, word: word)
         return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+    func addLearningFields(to object: inout [String: Any], word: String) {
+        object["wordLink"] = ["source": word, "cue": "把 \(word) 作为可识别的字母支架（离线助记样例）",
+            "connection": "\(word) 的字母本身支起画面中的帮助动作，读到原词便回到帮助这一含义。", "recall": "看到 \(word) → 字母支架 → 帮助；这是视觉助记，不是词源。"]
+        object["illustration"] = ["scene": "\(word) 的完整字母组成支架，帮助人物完成动作。",
+            "mappings": [["source": word, "visual": "按原顺序排列的全部字母形成支撑结构", "meaning": "用支撑动作连接帮助的含义"]],
+            "explanation": "\(word) 字母承担画面的支撑作用，不只是贴在一张普通场景上的标签。", "recall": "看到 \(word) → 字母支架 → 帮助的动作。"]
+    }
+    func linkedCard(_ word: String) -> MemoryCard {
+        var object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(card(word))) as! [String: Any]
+        addLearningFields(to: &object, word: word)
+        return try! JSONDecoder().decode(MemoryCard.self, from: JSONSerialization.data(withJSONObject: object))
     }
     func snapshot(_ word: String) -> MaimemoAXSnapshot {
         MaimemoAXSnapshot(appFound: true, appName: "离线墨墨", isTrusted: true, word: word, windowFrame: nil, nodeCount: 20, candidates: [], scannedAt: Date(), diagnostic: "离线测试")

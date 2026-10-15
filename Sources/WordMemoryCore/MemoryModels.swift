@@ -95,12 +95,52 @@ public struct MemoryAnchor: Codable, Hashable, Sendable {
     public let cue: String
     public let explanation: String
     public let imagePrompt: String?
+    /// Local prepared-anchor metadata. The model sends these at card level only.
+    public let wordLink: MemoryWordLink?
+    public let illustration: MemoryIllustrationPlan?
 
-    public init(kind: MemoryAnchorKind, cue: String, explanation: String, imagePrompt: String? = nil) {
+    public init(kind: MemoryAnchorKind, cue: String, explanation: String, imagePrompt: String? = nil, wordLink: MemoryWordLink? = nil, illustration: MemoryIllustrationPlan? = nil) {
         self.kind = kind
         self.cue = cue
         self.explanation = explanation
         self.imagePrompt = imagePrompt
+        self.wordLink = wordLink; self.illustration = illustration
+    }
+}
+
+/// The recoverable path from an exact part of the English spelling to its meaning.
+/// It describes a suggested memory aid; it does not certify an etymology or learning outcome.
+public struct MemoryWordLink: Codable, Hashable, Sendable {
+    public let source: String
+    public let cue: String
+    public let connection: String
+    public let recall: String
+
+    public init(source: String, cue: String, connection: String, recall: String) {
+        self.source = source; self.cue = cue; self.connection = connection; self.recall = recall
+    }
+}
+
+public struct MemoryVisualMapping: Codable, Hashable, Sendable {
+    /// A literal, ordered substring of the word, not an invented root.
+    public let source: String
+    public let visual: String
+    public let meaning: String
+
+    public init(source: String, visual: String, meaning: String) {
+        self.source = source; self.visual = visual; self.meaning = meaning
+    }
+}
+
+/// One shared plan drives both the image request and its visible explanation.
+public struct MemoryIllustrationPlan: Codable, Hashable, Sendable {
+    public let scene: String
+    public let mappings: [MemoryVisualMapping]
+    public let explanation: String
+    public let recall: String
+
+    public init(scene: String, mappings: [MemoryVisualMapping], explanation: String, recall: String) {
+        self.scene = scene; self.mappings = mappings; self.explanation = explanation; self.recall = recall
     }
 }
 
@@ -118,8 +158,10 @@ public struct MemoryCard: Codable, Hashable, Sendable {
     public let alternateAnchor: MemoryAnchor?
     public let anchors: [MemoryAnchor]?
     public let analysis: WordAnalysis?
+    public let wordLink: MemoryWordLink?
+    public let illustration: MemoryIllustrationPlan?
 
-    public init(word: String, coreConcept: String, coreImage: String, branches: [MeaningBranch], methods: [MemoryMethod], transferCheck: TransferCheck, caveat: String?, anchor: MemoryAnchor? = nil, alternateAnchor: MemoryAnchor? = nil, anchors: [MemoryAnchor]? = nil, analysis: WordAnalysis? = nil) {
+    public init(word: String, coreConcept: String, coreImage: String, branches: [MeaningBranch], methods: [MemoryMethod], transferCheck: TransferCheck, caveat: String?, anchor: MemoryAnchor? = nil, alternateAnchor: MemoryAnchor? = nil, anchors: [MemoryAnchor]? = nil, analysis: WordAnalysis? = nil, wordLink: MemoryWordLink? = nil, illustration: MemoryIllustrationPlan? = nil) {
         self.word = word
         self.coreConcept = coreConcept
         self.coreImage = coreImage
@@ -127,14 +169,18 @@ public struct MemoryCard: Codable, Hashable, Sendable {
         self.methods = methods
         self.transferCheck = transferCheck
         self.caveat = caveat
-        self.anchor = anchor
+        if let anchor, wordLink != nil || illustration != nil {
+            self.anchor = MemoryAnchor(kind: anchor.kind, cue: anchor.cue, explanation: anchor.explanation,
+                imagePrompt: anchor.imagePrompt, wordLink: wordLink, illustration: illustration)
+        } else { self.anchor = anchor }
         self.alternateAnchor = alternateAnchor
         self.anchors = anchors
         self.analysis = analysis
+        self.wordLink = wordLink; self.illustration = illustration
     }
 
     public func anchor(for kind: MemoryAnchorKind) -> MemoryAnchor? {
-        if anchor?.kind == kind { return anchor }
+        if let anchor, anchor.kind == kind { return prepared(anchor) }
         if alternateAnchor?.kind == kind { return alternateAnchor }
         if let saved = anchors?.first(where: { $0.kind == kind }) { return saved }
         return nil
@@ -142,36 +188,42 @@ public struct MemoryCard: Codable, Hashable, Sendable {
 
     public func selectingAnchor(_ kind: MemoryAnchorKind) -> MemoryCard? {
         guard let selected = anchor(for: kind) else { return nil }
-        let other = anchor?.kind == kind ? alternateAnchor : anchor
+        let other = anchor?.kind == kind ? alternateAnchor : anchor.map(prepared)
         return replacingAnchors(selected: selected, alternate: other)
     }
 
     public func replacingAnchor(_ selected: MemoryAnchor) -> MemoryCard {
-        let other = anchor?.kind == selected.kind ? alternateAnchor : anchor
+        let other = anchor?.kind == selected.kind ? alternateAnchor : anchor.map(prepared)
         return replacingAnchors(selected: selected, alternate: other)
     }
 
     public func withAlternateAnchor(_ alternate: MemoryAnchor?) -> MemoryCard {
         guard let anchor else { return self }
-        return replacingAnchors(selected: anchor, alternate: alternate)
+        return replacingAnchors(selected: prepared(anchor), alternate: alternate)
     }
 
     private func replacingAnchors(selected: MemoryAnchor, alternate: MemoryAnchor?) -> MemoryCard {
         MemoryCard(word: word, coreConcept: coreConcept, coreImage: coreImage,
                    branches: branches, methods: methods, transferCheck: transferCheck,
                    caveat: caveat, anchor: selected, alternateAnchor: alternate,
-                   anchors: anchors, analysis: analysis)
+                   anchors: anchors, analysis: analysis, wordLink: selected.wordLink, illustration: selected.illustration)
+    }
+
+    private func prepared(_ value: MemoryAnchor) -> MemoryAnchor {
+        guard value == anchor, wordLink != nil || illustration != nil else { return value }
+        return MemoryAnchor(kind: value.kind, cue: value.cue, explanation: value.explanation,
+            imagePrompt: value.imagePrompt, wordLink: wordLink, illustration: illustration)
     }
 
     public func preservingAnchors(from previous: MemoryCard) -> MemoryCard {
         var saved = previous.anchors ?? []
-        for item in [previous.anchor, previous.alternateAnchor].compactMap({ $0 }) {
+        for item in [previous.anchor.map(previous.prepared), previous.alternateAnchor].compactMap({ $0 }) {
             if !saved.contains(where: { $0.kind == item.kind }) { saved.append(item) }
         }
         saved.removeAll { $0.kind == anchor?.kind }
         return MemoryCard(word: word, coreConcept: coreConcept, coreImage: coreImage, branches: branches,
                           methods: methods, transferCheck: transferCheck, caveat: caveat, anchor: anchor,
-                          alternateAnchor: anchor?.kind == .letterIllustration ? nil : previous.anchor(for: .letterIllustration), anchors: saved, analysis: analysis)
+                          alternateAnchor: anchor?.kind == .letterIllustration ? nil : previous.anchor(for: .letterIllustration), anchors: saved, analysis: analysis, wordLink: wordLink, illustration: illustration)
     }
 
     public var versionKey: String {
@@ -188,7 +240,7 @@ public struct MemoryCard: Codable, Hashable, Sendable {
             try values.encode(card.coreImage); try values.encode(card.branches); try values.encode(card.methods)
             try values.encode(card.transferCheck); try values.encode(card.analysis)
             var all = card.anchors ?? []
-            for item in [card.anchor, card.alternateAnchor].compactMap({ $0 }) {
+            for item in [card.anchor.map(card.prepared), card.alternateAnchor].compactMap({ $0 }) {
                 if !all.contains(item) { all.append(item) }
             }
             try values.encode(all.sorted { $0.kind.rawValue < $1.kind.rawValue })
@@ -196,6 +248,22 @@ public struct MemoryCard: Codable, Hashable, Sendable {
     }
 
     public var illustrationPrompt: String {
+        if let plan = illustration {
+            let mappings = plan.mappings.map { mapping in
+                "Exact letters \(mapping.source): visual treatment \(mapping.visual); semantic role \(mapping.meaning)."
+            }.joined(separator: "\n")
+            return """
+            Create one clear visual mnemonic for the English word \(word).
+            The exact, fully readable word "\(word)" must be the main visual subject. Keep every letter once, in its correct order; do not replace the word with an ordinary illustration, add letters, or omit letters. Transform selected letter shapes into meaningful objects while preserving legibility. This is a personal visual mnemonic, not an etymological claim.
+            Shared core meaning: \(coreConcept).
+            Scene: \(plan.scene)
+            Required letter-to-image-to-meaning mappings:
+            \(mappings)
+            Intended explanation: \(plan.explanation)
+            Recall path: \(plan.recall)
+            Use one focused composition and at most three visual mappings. Let the letter shapes and their interaction carry the meaning, including abstract meaning. No unrelated objects, captions, Chinese labels, logos, or decorative lettering. The only text is the exact word "\(word)".
+            """
+        }
         if anchor?.kind == .letterIllustration, let prompt = anchor?.imagePrompt { return prompt }
         return "Create one clear, simple mnemonic illustration for the English word \(word). Meaning: \(coreConcept). Main cue: \(anchor?.cue ?? coreImage). Scene: \(coreImage). Depict only this useful relationship. Linguistic structure and personal mnemonic are distinct; do not invent etymology. No additional labels or text. If letters are shown, spell exactly \(word)."
     }
@@ -244,12 +312,14 @@ public struct QuickMemoryHint: Equatable, Sendable {
     public let coreConcept: String
     public let anchor: MemoryAnchor
     public let branch: MeaningBranch?
+    public let wordLink: MemoryWordLink?
 
-    public init(word: String, coreConcept: String, anchor: MemoryAnchor, branch: MeaningBranch? = nil) {
+    public init(word: String, coreConcept: String, anchor: MemoryAnchor, branch: MeaningBranch? = nil, wordLink: MemoryWordLink? = nil) {
         self.word = word
         self.coreConcept = coreConcept
         self.anchor = anchor
         self.branch = branch
+        self.wordLink = wordLink
     }
 }
 

@@ -74,6 +74,15 @@ public final class MemoryStore {
     @discardableResult
     public func moveHistory(for word: String, by offset: Int) throws -> MemoryCard? {
         guard let history = history(for: word).moving(by: offset) else { return nil }
+        return try selectHistory(for: word, at: history.selectedIndex)
+    }
+
+    /// Select the complete saved card, so method-specific links never borrow a newer analysis.
+    @discardableResult
+    public func selectHistory(for word: String, at index: Int) throws -> MemoryCard? {
+        var history = history(for: word)
+        guard history.cards.indices.contains(index) else { return nil }
+        history.selectedIndex = index
         let card = history.cards[history.selectedIndex]
         var next = state
         var histories = next.histories ?? [:]; histories[word.lowercased()] = history

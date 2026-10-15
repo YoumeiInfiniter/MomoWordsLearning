@@ -153,8 +153,9 @@ final class CompanionViewModel: ObservableObject {
                 memoryImageURL = memoryCard.flatMap { imageURL(for: $0) }
                 imageError = nil
                 quickHint = quickHints[word.lowercased()]
-                if quickHint == nil, let received = failedResponses.latest(for: word), received.finishReason != "content_filter",
-                   let hint = MemoryHarness.quickHint(from: received.content, expectedWord: word),
+                if quickHint == nil, activeGenerations[word.lowercased()] == nil,
+                   let received = failedResponses.latest(for: word), received.finishReason != "content_filter",
+                   let hint = MemoryHarness.quickHint(from: received.content, expectedWord: word, requiresLearningLink: received.request.requiresLearningLink == true),
                    received.request.allowedAnchorKinds.contains(hint.anchor.kind) {
                     quickHint = hint
                 }
@@ -241,7 +242,7 @@ final class CompanionViewModel: ObservableObject {
                 if kind == .letterIllustration && generateImage { generateCurrentIllustration() }
             } catch { memoryError = error.localizedDescription }
         } else {
-            generateMemoryCard(requestedAnchorKind: kind, switchingAnchor: memoryCard != nil)
+            generateMemoryCard(requestedAnchorKind: kind, switchingAnchor: memoryCard != nil, authorizeIllustration: kind == .letterIllustration && generateImage)
         }
     }
 
@@ -254,8 +255,13 @@ final class CompanionViewModel: ObservableObject {
     }
     func retrySelectedAnchor() {
         if let response = currentFailedResponse, response.request.existingCard == memoryCard {
-            generateMemoryCard(capturedRequest: response.request.renewed())
+            generateMemoryCard(capturedRequest: response.request.renewed(requiresLearningLink: true))
         } else { generateMemoryCard() }
+    }
+    func upgradeCurrentLearningLink() {
+        guard isMemoryRevealed, memoryCard != nil, !isGenerating else { return }
+        // Explicit text improvement prepares both explanations; it does not authorize an image POST.
+        generateMemoryCard()
     }
     func reparseReceivedResponse() {
         guard let response = currentFailedResponse, canReparseCurrentResponse else { return }
@@ -301,9 +307,14 @@ final class CompanionViewModel: ObservableObject {
     }
 
     func moveHistory(by offset: Int) {
+        guard cardHistory.canMove(by: offset) else { return }
+        selectHistoryVersion(at: cardHistory.selectedIndex + offset)
+    }
+
+    func selectHistoryVersion(at index: Int) {
         guard isMemoryRevealed, !isGenerating, let word = snapshot.word else { return }
         do {
-            guard let card = try memoryStore.moveHistory(for: word, by: offset) else { return }
+            guard let card = try memoryStore.selectHistory(for: word, at: index) else { return }
             memoryCard = card; selectedAnchorKind = card.anchor?.kind ?? .context
             quickHint = nil; quickHints.removeValue(forKey: word.lowercased())
             learnerNote = ""; reasonTags = []; memoryError = nil; selectedBranchWasExplicit = false
@@ -374,7 +385,7 @@ final class CompanionViewModel: ObservableObject {
         }
     }
 
-    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false, preset: MemoryPreset? = nil, capturedRequest: MemoryRequest? = nil) {
+    func generateMemoryCard(requestedAnchorKind: MemoryAnchorKind? = nil, switchingAnchor: Bool = false, preset: MemoryPreset? = nil, capturedRequest: MemoryRequest? = nil, authorizeIllustration: Bool = false) {
         guard let word = snapshot.word, !isGenerating else { return }
         guard memoryStore.loadWarning == nil else { memoryError = memoryStore.loadWarning; return }
         let wordKey = word.lowercased()
@@ -394,13 +405,14 @@ final class CompanionViewModel: ObservableObject {
             preferredAnchorKind: requestedAnchorKind ?? .sound, isAnchorRevision: original != nil,
             strategy: requestedAnchorKind == nil ? (preset?.strategy ?? .auto) : nil,
             preset: preset, reasonTags: RevisionReasonTag.allCases.filter { reasonTags.contains($0) },
-            visibleContext: nil, focusBranchID: focused?.id, previousUserNote: previous?.userNote ?? "")
+            visibleContext: nil, focusBranchID: focused?.id, previousUserNote: previous?.userNote ?? "", requiresLearningLink: true)
         guard request.word == word, request.existingCard == original else { memoryError = MemoryStore.StoreError.staleRevision.localizedDescription; return }
         let generationID = request.requestID
         activeGenerations[wordKey] = generationID
-        quickHint = nil; memoryError = nil; generationErrors.removeValue(forKey: wordKey)
+        quickHint = nil; quickHints.removeValue(forKey: wordKey)
+        memoryError = nil; generationErrors.removeValue(forKey: wordKey)
         // Image choice authorizes one generation after the full text prompt passes validation.
-        let wantsImage = request.requiredAnchorKind == .letterIllustration
+        let wantsImage = authorizeIllustration && request.requiredAnchorKind == .letterIllustration
         generationTasks[wordKey] = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -472,6 +484,10 @@ final class CompanionViewModel: ObservableObject {
     }
 
     private func enqueueIllustration(for card: MemoryCard, newGeneration: Bool = false) {
+        guard card.wordLink != nil, card.illustration != nil else {
+            imageError = "这份旧记法尚未记录原词与图片元素的对应关系；请先补齐原词联系，再主动生成插画"
+            return
+        }
         guard let generator = imageGenerator else { imageError = MaiziImageError.notConfigured.localizedDescription; return }
         do {
             let identity = ImageTaskIdentity(word: card.word, versionID: card.versionKey, prompt: card.illustrationPrompt)
@@ -547,6 +563,7 @@ final class CompanionViewModel: ObservableObject {
 struct SidebarView: View {
     @ObservedObject var model: CompanionViewModel
     @State private var isRevealHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let background = Color(red: 0.055, green: 0.075, blue: 0.105)
     private let muted = Color.white.opacity(0.58)
@@ -560,10 +577,13 @@ struct SidebarView: View {
                 endPoint: .bottomTrailing
             )
             .ignoresSafeArea()
+            RadialGradient(colors: [Color(red: 0.36, green: 0.55, blue: 0.75).opacity(0.16), .clear],
+                           center: .topLeading, startRadius: 0, endRadius: 430)
+                .ignoresSafeArea().allowsHitTesting(false)
 
             GeometryReader { geometry in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 20) {
                         if model.showSettings {
                             settingsPage
                         } else {
@@ -579,13 +599,15 @@ struct SidebarView: View {
                             }
                         }
                     }
-                    .padding(26)
+                    .padding(geometry.size.width < 365 ? 18 : 24)
                     .frame(minHeight: geometry.size.height, alignment: .top)
                 }
             }
         }
         .frame(minWidth: 320, idealWidth: 410, maxWidth: 580, minHeight: 300)
         .preferredColorScheme(.dark)
+        .animation(MemoryMotion.animation(reduceMotion: reduceMotion), value: model.isMemoryRevealed)
+        .animation(MemoryMotion.animation(reduceMotion: reduceMotion), value: model.showSettings)
         .sheet(isPresented: $model.showImageTasks) {
             ImageTaskListView(model: model, tasks: model.imageTasks)
         }
@@ -608,7 +630,7 @@ struct SidebarView: View {
         .accessibilityLabel("查看\(model.snapshot.word ?? "当前单词")的线索")
         .accessibilityHint("已有线索立即显示；没有线索时调用已配置的模型")
         .onHover { isRevealHovered = $0 }
-        .animation(.easeOut(duration: 0.16), value: isRevealHovered)
+        .animation(MemoryMotion.animation(reduceMotion: reduceMotion), value: isRevealHovered)
     }
 
     private var header: some View {
@@ -623,24 +645,23 @@ struct SidebarView: View {
                 .accessibilityHidden(true)
             Spacer()
             if model.isMemoryRevealed {
-                Button { model.collapseMemoryHelp() } label: { Image(systemName: "eye.slash") }
-                    .buttonStyle(.plain).accessibilityLabel("收起线索")
+                Button { model.collapseMemoryHelp() } label: { Image(systemName: "eye.slash").frame(width: 16, height: 16) }
+                    .memoryGlassButtonStyle().accessibilityLabel("收起线索")
             }
             Button { model.showImageTasks = true } label: {
-                Image(systemName: "photo.stack")
+                Image(systemName: "photo.stack").frame(width: 16, height: 16)
                     .overlay(alignment: .topTrailing) {
                         if model.imageTasks.records.contains(where: { $0.state.isActive }) {
                             Circle().fill(.orange).frame(width: 5, height: 5).offset(x: 5, y: -5)
                         }
                     }
-            }.buttonStyle(.plain).accessibilityLabel("后台插画任务")
+            }.memoryGlassButtonStyle().accessibilityLabel("后台插画任务")
             Button { model.openSettings() } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 15, weight: .medium))
-                    .frame(width: 40, height: 40)
-                    .background(.ultraThinMaterial, in: Circle())
+                    .frame(width: 16, height: 16)
             }
-            .buttonStyle(.plain)
+            .memoryGlassButtonStyle()
             .accessibilityLabel("设置")
         }
     }
@@ -677,7 +698,8 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 4)
-        .padding(.vertical, 24)
+        .padding(.top, 16)
+        .padding(.bottom, 12)
     }
 
     private var settingsPage: some View {
@@ -851,6 +873,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             switch Bundle.main.object(forInfoDictionaryKey: "MaimemoPreviewScenario") as? String {
             case "response-recovery": model = CompanionLifecycleChecks.recoveryPreviewModel()
             case "image-payment": model = CompanionLifecycleChecks.paymentPreviewModel()
+            case "learning-link": model = LearningPreview.model()
+            case "measure-link": model = LearningPreview.model(word: "measure")
+            case "legacy-link": model = LearningPreview.model(legacy: true)
             default: model = CompanionLifecycleChecks.previewModel()
             }
         }
@@ -891,7 +916,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         if (CommandLine.arguments.contains("--offline-preview") || Bundle.main.bundleIdentifier == "local.maimemo.companion.preview") {
             window.title = "Maimemo Companion · 离线界面预览"
-            window.setFrame(NSRect(x: 600, y: 100, width: 410, height: 850), display: true)
+            let previewWidth = min(580, max(320, Bundle.main.object(forInfoDictionaryKey: "MaimemoPreviewWidth") as? Double ?? 410))
+            window.setFrame(NSRect(x: 600, y: 100, width: previewWidth, height: 850), display: true)
             NSApp.activate(ignoringOtherApps: true)
             return
         }

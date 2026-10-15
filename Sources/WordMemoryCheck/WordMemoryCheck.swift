@@ -25,6 +25,7 @@ struct WordMemoryCheck {
         try await JSONContractChecks.run(card: contractCard)
         try await V3Checks.run(card: sample)
         try await ResponseNormalizationChecks.run()
+        try LearningLinkChecks.run()
         print("word-memory-check: 通过 JSON 结尾安全恢复与中断诊断、历史导航与持久选择、联想重做、可选原因、旧卡归档、失败保护、思考开关、单次请求与存储检查")
     }
 

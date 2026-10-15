@@ -139,7 +139,7 @@ public struct OpenAICompatibleClient: Sendable {
                 if let event = decoder.append(byte) {
                     try accumulator.append(event.data)
                     if accumulator.isDone { break }
-                    if !didEmitHint, let hint = MemoryHarness.quickHint(from: accumulator.content, expectedWord: request.word),
+                    if !didEmitHint, let hint = MemoryHarness.quickHint(from: accumulator.content, expectedWord: request.word, requiresLearningLink: request.requiresLearningLink == true),
                        request.allowedAnchorKinds.contains(hint.anchor.kind) {
                         didEmitHint = true; await onQuickHint(hint)
                     }

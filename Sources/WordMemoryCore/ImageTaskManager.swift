@@ -39,8 +39,19 @@ public struct ImageTaskFailure: Error, Codable, LocalizedError, Sendable {
     public let phase: String
     public let kind: String
     public let message: String
+    public let httpStatus: Int?
     public var errorDescription: String? { message }
-    public init(phase: String, kind: String, message: String) { self.phase = phase; self.kind = kind; self.message = message }
+    public init(phase: String, kind: String, message: String, httpStatus: Int? = nil) {
+        self.phase = phase; self.kind = kind; self.message = message; self.httpStatus = httpStatus
+    }
+    public var isPaymentRequired: Bool {
+        phase == "submitting" && (kind == "payment_required" || httpStatus == 402 ||
+            (kind == "rejected" && message == "图片生成请求失败（HTTP 402）"))
+    }
+    /// Older records have only a generic message; explain them without rewriting user data.
+    public var userMessage: String {
+        isPaymentRequired && kind != "payment_required" ? ImagePaymentIssue.unknown.message : message
+    }
 }
 public struct ImageTaskRecord: Codable, Identifiable, Sendable {
     public let id: UUID

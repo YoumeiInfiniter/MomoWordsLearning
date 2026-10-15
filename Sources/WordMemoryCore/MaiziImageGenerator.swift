@@ -1,9 +1,38 @@
 import Foundation
 import Security
 
+/// Only retain a known category, never an untrusted response body (which can echo credentials).
+public enum ImagePaymentIssue: Sendable {
+    case balance, quota, unknown
+
+    public var message: String {
+        let detail = switch self {
+        case .balance: "服务返回了余额不足提示。"
+        case .quota: "服务返回了额度不足提示。"
+        case .unknown: "尚未识别具体原因。"
+        }
+        return "图片服务拒绝请求（HTTP 402）。\(detail)请核对 MaiziAI 余额、此图片 Key 的额度与模型权限；均正常时请服务商核查上游通道。未自动重试，扣费情况以服务记录为准。"
+    }
+
+    static func parse(_ data: Data) -> Self {
+        guard data.count <= 64 * 1_024,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .unknown }
+        let error = root["error"] as? [String: Any] ?? root
+        let codes = [error["code"], error["type"]].compactMap { $0 as? String }.map { $0.lowercased() }
+        if codes.contains(where: { ["insufficient_balance", "balance_not_enough", "insufficient_funds"].contains($0) }) { return .balance }
+        if codes.contains(where: { ["insufficient_quota", "quota_exceeded", "credit_balance_too_low", "insufficient_credits"].contains($0) }) { return .quota }
+        // Use only explicit insufficient-balance/quota phrases; don't persist or display raw text.
+        let message = ((error["message"] as? String) ?? (root["error"] as? String) ?? "").lowercased()
+        if ["余额不足", "insufficient balance", "insufficient funds"].contains(where: { message.contains($0) }) { return .balance }
+        if ["额度不足", "配额不足", "insufficient quota", "insufficient credits"].contains(where: { message.contains($0) }) { return .quota }
+        return .unknown
+    }
+}
+
 public enum MaiziImageError: LocalizedError {
     case notConfigured
     case requestFailed(Int)
+    case paymentRequired(ImagePaymentIssue)
     case downloadFailed(Int)
     case invalidResponse
     case unsafeImageURL
@@ -14,7 +43,9 @@ public enum MaiziImageError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notConfigured: "请先在设置中保存图片生成 API Key"
+        case .requestFailed(402): ImagePaymentIssue.unknown.message
         case .requestFailed(let status): "图片生成请求失败（HTTP \(status)）"
+        case .paymentRequired(let issue): issue.message
         case .downloadFailed(let status): "生成图片下载失败（HTTP \(status)）"
         case .invalidResponse: "图片服务没有返回可用的 URL 或 base64 图片"
         case .unsafeImageURL: "图片服务返回了不安全的图片地址"
@@ -29,13 +60,20 @@ public enum MaiziImageError: LocalizedError {
         let kind: String
         switch self {
         case .notConfigured: phase = "submitting"; kind = "authentication"
+        case .paymentRequired, .requestFailed(402): phase = "submitting"; kind = "payment_required"
         case .requestFailed(let status): phase = "submitting"; kind = status == 401 || status == 403 ? "authentication" : "rejected"
         case .downloadFailed: phase = "downloading"; kind = "download"
         case .invalidResponse, .unsafeImageURL, .imageTooLarge: phase = "response"; kind = "unsupported_format"
         case .remoteFailed: phase = "generating"; kind = "remote_failure"
         case .unsupportedAsync: phase = "response"; kind = "unsupported_async"
         }
-        return ImageTaskFailure(phase: phase, kind: kind, message: localizedDescription)
+        let status: Int?
+        switch self {
+        case .paymentRequired: status = 402
+        case .requestFailed(let value), .downloadFailed(let value): status = value
+        default: status = nil
+        }
+        return ImageTaskFailure(phase: phase, kind: kind, message: localizedDescription, httpStatus: status)
     }
 }
 
@@ -167,6 +205,7 @@ public struct MaiziImageGenerator: StagedMemoryImageGenerator {
         let (data, response) = try await session.data(for: request)
         try Task.checkCancellation()
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 402 { throw MaiziImageError.paymentRequired(ImagePaymentIssue.parse(data)) }
         guard (200..<300).contains(status) else { throw MaiziImageError.requestFailed(status) }
         guard data.count <= 28 * 1_024 * 1_024 else { throw MaiziImageError.imageTooLarge }
         return try MaiziImageResponseParser.parse(data)

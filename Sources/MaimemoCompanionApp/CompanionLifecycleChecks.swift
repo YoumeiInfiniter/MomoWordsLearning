@@ -20,9 +20,10 @@ struct CompanionLifecycleChecks {
         try await checks.testFailedNewCardKeepsOriginalAndBranchPresetNeedsSelection()
         try await checks.testFailureReturnAndCachedAnchorNeverSubmit()
         try checks.testLocalReceivedResponseRecovery()
+        try await checks.testImagePaymentFailureDoesNotResubmit()
         print("companion-lifecycle-check: 切词、设置、收起、重复点击、旧图与新版本隔离、历史零请求、原词保存和失败保护通过")
     }
-    static func previewModel() -> CompanionViewModel {
+    static func previewModel(imageGenerator: (any MemoryImageGenerator)? = nil) -> CompanionViewModel {
         let checks = Self()
         let directory = try! checks.temporaryDirectory()
         var object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(checks.card("helpfulness"))) as! [String: Any]
@@ -45,10 +46,33 @@ struct CompanionLifecycleChecks {
         Fixture.configure(String(decoding: data, as: UTF8.self))
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [Fixture.self]
         let model = CompanionViewModel(memoryStore: store, imageStore: MemoryImageStore(directoryURL: directory.appendingPathComponent("images")),
-            imageGenerator: DelayedImage(data: try! checks.png()), modelClient: OpenAICompatibleClient(session: URLSession(configuration: configuration)),
+            imageGenerator: imageGenerator ?? DelayedImage(data: try! checks.png()), modelClient: OpenAICompatibleClient(session: URLSession(configuration: configuration)),
             modelConfiguration: ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!, model: "fixture", apiKey: "fixture-only"), checkStoredKeys: false)
         model.applySnapshot(checks.snapshot("helpfulness")); model.revealMemoryHelp()
         return model
+    }
+
+    static func paymentPreviewModel() -> CompanionViewModel {
+        let model = previewModel(imageGenerator: PaymentRejectedImage())
+        model.generateCurrentIllustration()
+        return model
+    }
+
+    func testImagePaymentFailureDoesNotResubmit() async throws {
+        let generator = PaymentRejectedImage()
+        let model = Self.previewModel(imageGenerator: generator)
+        defer { try? FileManager.default.removeItem(at: model.imageTasks.fileURL.deletingLastPathComponent()) }
+        model.generateCurrentIllustration()
+        try await waitFor { model.currentImageTask?.state == .failed }
+        try Self.yes(model.currentImageTask?.failure?.isPaymentRequired == true)
+        model.openSettings(); model.returnToLearning()
+        model.collapseMemoryHelp(); model.revealMemoryHelp()
+        model.applySnapshot(snapshot("raincoat")); model.applySnapshot(snapshot("helpfulness")); model.revealMemoryHelp()
+        model.generateCurrentIllustration()
+        try Self.equal(await generator.count, 1)
+        try Self.yes(model.currentImageTask?.failure?.isPaymentRequired == true)
+        try Self.notNil(model.memoryCard)
+        try Self.equal(Fixture.count, 0)
     }
 
     static func recoveryPreviewModel() -> CompanionViewModel {
@@ -268,6 +292,13 @@ private actor DelayedImage: MemoryImageGenerator {
         count += 1
         try await Task.sleep(for: .milliseconds(350))
         return data
+    }
+}
+private actor PaymentRejectedImage: MemoryImageGenerator {
+    var count = 0
+    func generateImage(prompt: String) async throws -> Data {
+        count += 1
+        throw MaiziImageError.paymentRequired(.balance)
     }
 }
 private final class Fixture: URLProtocol, @unchecked Sendable {

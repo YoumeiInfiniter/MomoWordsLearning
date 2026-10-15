@@ -196,11 +196,15 @@ struct MemoryLinkPanelView: View {
                     Text(task.state.label).font(.custom("Songti SC", size: 12))
                 }
                 if let failure = task.failure {
-                    Text(failure.message).font(.caption).foregroundStyle(.orange)
+                    Text(failure.userMessage).font(.caption).foregroundStyle(.orange)
+                    if failure.isPaymentRequired {
+                        Link("查看 MaiziAI 账户", destination: URL(string: "https://www.maizitech.ai/")!).font(.caption)
+                        Button("检查图片 Key 设置") { model.openSettings() }.font(.caption)
+                    }
                     if model.imageTasks.canResume(task) {
                         Button("继续下载／保存原结果") { model.resumeImageResult(task) }.buttonStyle(.bordered)
                     } else if !task.state.isActive {
-                        Button("重新生成一张 · 可能再次计费") { model.generateCurrentIllustration(newGeneration: true) }
+                        Button(failure.isPaymentRequired ? "处理后重新提交 · 可能计费" : "重新生成一张 · 可能再次计费") { model.generateCurrentIllustration(newGeneration: true) }
                             .buttonStyle(.bordered).font(.caption)
                     }
                 }
@@ -264,7 +268,7 @@ struct ImageTaskListView: View {
                             Text("\(task.identity.word) · \(task.state.label)")
                             Text("版本 \(task.identity.versionID.prefix(8)) · \(task.updatedAt.formatted(date: .omitted, time: .shortened))")
                                 .font(.caption2).foregroundStyle(.secondary)
-                            if let failure = task.failure { Text(failure.message).font(.caption).foregroundStyle(.orange) }
+                            if let failure = task.failure { Text(failure.userMessage).font(.caption).foregroundStyle(.orange) }
                             if task.state.isActive {
                                 Button(task.state == .queued ? "取消排队" : "停止本地等待 · 远端可能计费") { model.cancelImageTask(task) }
                                     .font(.caption)

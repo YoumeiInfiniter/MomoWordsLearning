@@ -462,7 +462,7 @@ final class CompanionViewModel: ObservableObject {
 
     private func refreshImageState() {
         memoryImageURL = memoryCard.flatMap { imageURL(for: $0) }
-        imageError = currentImageTask?.failure?.message ?? imageTasks.storageWarning
+        imageError = currentImageTask?.failure?.userMessage ?? imageTasks.storageWarning
         objectWillChange.send()
     }
 
@@ -848,8 +848,11 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     override init() {
         #if DEBUG
         if (CommandLine.arguments.contains("--offline-preview") || Bundle.main.bundleIdentifier == "local.maimemo.companion.preview") {
-            model = Bundle.main.object(forInfoDictionaryKey: "MaimemoPreviewScenario") as? String == "response-recovery"
-                ? CompanionLifecycleChecks.recoveryPreviewModel() : CompanionLifecycleChecks.previewModel()
+            switch Bundle.main.object(forInfoDictionaryKey: "MaimemoPreviewScenario") as? String {
+            case "response-recovery": model = CompanionLifecycleChecks.recoveryPreviewModel()
+            case "image-payment": model = CompanionLifecycleChecks.paymentPreviewModel()
+            default: model = CompanionLifecycleChecks.previewModel()
+            }
         }
         else { model = CompanionViewModel() }
         #else

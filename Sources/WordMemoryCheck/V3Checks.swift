@@ -120,6 +120,39 @@ enum V3Checks {
             try require(taskManager.records[0].failure?.kind == expectedKind && ImageHTTPFixture.methods == ["POST"], "HTTP 错误被混淆或自动重复提交")
             if expectedKind == "unsupported_async" { try require(taskManager.records[0].serverTaskID == "original-task", "已返回任务 ID 未保存") }
         }
+        let paymentFixtures: [(String, String)] = [
+            ("", "尚未识别具体原因"),
+            ("<html>fixture-private-response</html>", "尚未识别具体原因"),
+            (#"{"error":{"code":"insufficient_balance","message":"fixture-private-response"}}"#, "余额不足提示"),
+            (#"{"error":{"type":"insufficient_quota","message":"fixture-private-response"}}"#, "额度不足提示"),
+            (#"{"message":"账户余额不足 fixture-private-response"}"#, "余额不足提示"),
+            (#"{"error":"Insufficient credits fixture-private-response"}"#, "额度不足提示"),
+            (#"{"error":{"code":"unknown_code","message":"fixture-private-response"}}"#, "尚未识别具体原因"),
+            (#"{"error":{"code":"insufficient_balance","message":""# + String(repeating: "x", count: 65_537) + #""}}"#, "尚未识别具体原因")
+        ]
+        for (payload, expectedMessage) in paymentFixtures {
+            ImageHTTPFixture.configure([(402, Data(payload.utf8))])
+            let store = MemoryImageStore(directoryURL: directory.appendingPathComponent(UUID().uuidString).appendingPathComponent("images"))
+            let taskManager = ImageTaskManager(imageStore: store)
+            let id = try taskManager.enqueue(identity: identity, prompt: "help", generator: generator)
+            try await waitFor { taskManager.records.first?.state == .failed }
+            let record = taskManager.records[0]
+            try require(record.failure?.isPaymentRequired == true && record.failure?.httpStatus == 402 && record.failure?.phase == "submitting", "402 未保留提交阶段及付款分类")
+            try require(record.failure?.userMessage.contains(expectedMessage) == true && !taskManager.canResume(record), "402 原因提示不准确或错误允许下载")
+            let saved = try String(contentsOf: taskManager.fileURL, encoding: .utf8)
+            try require(!saved.contains("fixture-private-response") && !saved.contains("fixture-only"), "错误响应原文或密钥进入任务存储")
+            let reloaded = ImageTaskManager(imageStore: store)
+            let sameID = try reloaded.enqueue(identity: identity, prompt: "help", generator: generator)
+            try require(sameID == id && reloaded.records[0].failure?.isPaymentRequired == true && ImageHTTPFixture.methods == ["POST"], "402 重启或重复点击再次提交")
+            // Once the account issue is resolved, only an explicit new generation may submit again.
+            ImageHTTPFixture.configure([(200, try JSONSerialization.data(withJSONObject: ["data": [["b64_json": png.base64EncodedString()]]]))])
+            let retryID = try reloaded.enqueue(identity: identity, prompt: "help", generator: generator, newGeneration: true)
+            try await waitFor { reloaded.records.last?.state == .completed }
+            try require(retryID != id && ImageHTTPFixture.methods == ["POST"], "402 后主动提交未恢复为单次请求")
+        }
+        let legacyFailure = try JSONDecoder().decode(ImageTaskFailure.self, from: Data(#"{"phase":"submitting","kind":"rejected","message":"图片生成请求失败（HTTP 402）"}"#.utf8))
+        try require(legacyFailure.isPaymentRequired && legacyFailure.userMessage.contains("核对 MaiziAI"), "旧版 402 任务未兼容显示")
+        try require(!MaiziImageError.downloadFailed(402).taskFailure.isPaymentRequired, "图片下载 402 被误判为生成付款限制")
         try require(MemoryPreset.naturalSound.conflict(with: "不要谐音") != nil && MemoryPreset.hybrid.conflict(with: "不要整词谐音，只补局部") == nil, "补充冲突判断过宽或漏掉直接冲突")
     }
 

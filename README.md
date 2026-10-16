@@ -6,7 +6,9 @@
 
 Maimemo Companion 是原生 macOS 伴学侧栏，独立运行，通过 Accessibility 只读跟随 Mac 上墨墨背单词的当前词。墨墨继续负责复习安排；Companion 帮你把词形、核心意思和当句用法连起来。
 
-当前版本 **0.5.2**。深色玻璃主题保留，文字与图片拥有同级入口、各自线索和共用解释。首屏优先展示紧凑主线索、共同含义与例句；逐项拆词、依据和回忆路径按需展开。验证记录与实际使用边界见 [说明与验收记录](./V3_WORD_LINK.md)。
+当前版本 **0.5.3**。深色玻璃主题保留，文字与图片拥有同级入口、各自线索和共用解释。首屏优先展示紧凑主线索、共同含义与例句；逐项拆词、依据和回忆路径按需展开。验证记录与实际使用边界见 [说明与验收记录](./V3_WORD_LINK.md)。
+
+0.5.3 修复短语抓取：支持完整短语及 `sth.`、`sb.`、撇号与连字符；按墨墨顶部标题的位置和尺寸识别，过滤 `phraseAnnotationAll`、`moreLines` 等内部控件名，正文例句不作词条。侧栏将短语分行显示。
 
 ## 从英文原词找到意思
 
@@ -90,6 +92,7 @@ open "build/Maimemo Companion.app"
 离线检查不使用真实 Key、不连接模型服务：
 
 ```sh
+./Tests/check-ax-reader.sh
 ./Tests/check-word-memory.sh
 ./Tests/check-companion-lifecycle.sh
 ```

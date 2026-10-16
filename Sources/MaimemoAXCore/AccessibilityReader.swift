@@ -143,13 +143,6 @@ public final class MaimemoAccessibilityReader {
 }
 
 private struct AXTreeScanner {
-    private let excludedWords: Set<String> = [
-        "back", "cancel", "close", "confirm", "continue", "delete", "done", "edit",
-        "enter", "exit", "finish", "forward", "history", "home", "more", "next",
-        "no", "pause", "play", "previous", "reset", "review", "save", "search",
-        "settings", "skip", "start", "stop", "submit", "today", "yes"
-    ]
-
     func scan(pid: pid_t, appName: String) -> MaimemoAXSnapshot {
         let application = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(application, 0.2)
@@ -159,21 +152,14 @@ private struct AXTreeScanner {
         context.deadline = ProcessInfo.processInfo.systemUptime + 1.2
         visit(root, context: &context, depth: 0, windowFrame: nil)
 
-        let ranked = context.candidates
-            .sorted { lhs, rhs in
-                if lhs.score == rhs.score { return lhs.text < rhs.text }
-                return lhs.score > rhs.score
-            }
-            .prefix(8)
-
-        let candidates = Array(ranked)
+        let candidates = MaimemoHeadwordRecognizer.ranked(context.candidates)
         let word = candidates.first?.text
         let frame = context.windowFrame
         let diagnostic: String
         if let word {
             diagnostic = "读取 \(context.nodeCount) 个节点，最佳候选：\(word)" + (context.timedOut ? "（扫描限时）" : "")
         } else {
-            diagnostic = "读取 \(context.nodeCount) 个节点，未找到单个英文单词候选" + (context.timedOut ? "（扫描限时）" : "")
+            diagnostic = "读取 \(context.nodeCount) 个节点，未找到英文单词或短语候选" + (context.timedOut ? "（扫描限时）" : "")
         }
 
         return MaimemoAXSnapshot(
@@ -195,7 +181,6 @@ private struct AXTreeScanner {
         var sequence = 0
         var candidates: [AXTextCandidate] = []
         var windowFrame: CGRect?
-        var seenTexts = Set<String>()
         var deadline: TimeInterval = 0
         var timedOut = false
     }
@@ -229,44 +214,21 @@ private struct AXTreeScanner {
         context.sequence += 1
 
         let role = stringValue(copyAttribute(element, kAXRoleAttribute as String)) ?? ""
-        let frame = axFrame(of: element) ?? windowFrame
+        let ownFrame = axFrame(of: element)
+        let frame = ownFrame ?? windowFrame
         if role == kAXWindowRole as String, let frame {
             context.windowFrame = frame
         } else if context.windowFrame == nil, let frame = windowFrame {
             context.windowFrame = frame
         }
 
-        let attributes = [
-            kAXTitleAttribute as String,
-            kAXValueAttribute as String,
-            kAXDescriptionAttribute as String,
-            kAXHelpAttribute as String
-        ]
+        let attributes = [kAXTitleAttribute as String, kAXValueAttribute as String, kAXDescriptionAttribute as String]
         for attribute in attributes {
-            guard let raw = copyAttribute(element, attribute),
-                  let text = stringValue(raw),
-                  let normalized = normalizedWord(text),
-                  !context.seenTexts.contains(normalized) else {
-                continue
-            }
-            context.seenTexts.insert(normalized)
-            let score = score(
-                text: normalized,
-                role: role,
-                sourceAttribute: attribute,
-                frame: frame,
-                sequence: context.sequence,
-                windowFrame: context.windowFrame
-            )
-            context.candidates.append(
-                AXTextCandidate(
-                    text: normalized,
-                    role: role,
-                    sourceAttribute: attribute,
-                    score: score,
-                    frame: frame ?? .zero
-                )
-            )
+            guard let text = stringValue(copyAttribute(element, attribute)),
+                  let candidate = MaimemoHeadwordRecognizer.candidate(
+                    text: text, role: role, sourceAttribute: attribute, frame: ownFrame,
+                    sequence: context.sequence, windowFrame: context.windowFrame) else { continue }
+            context.candidates.append(candidate)
         }
 
         guard let childrenValue = copyAttribute(element, kAXChildrenAttribute as String),
@@ -276,48 +238,6 @@ private struct AXTreeScanner {
         for child in children {
             visit(child, context: &context, depth: depth + 1, windowFrame: frame ?? windowFrame)
         }
-    }
-
-    private func normalizedWord(_ text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 2, trimmed.count <= 40 else { return nil }
-        guard trimmed.unicodeScalars.allSatisfy({
-            CharacterSet.letters.contains($0) || $0 == "-" || $0 == "'"
-        }) else {
-            return nil
-        }
-        let lowercase = trimmed.lowercased()
-        guard lowercase.range(of: "^[a-z][a-z'-]*$", options: .regularExpression) != nil else {
-            return nil
-        }
-        guard !excludedWords.contains(lowercase) else { return nil }
-        return lowercase
-    }
-
-    private func score(
-        text: String,
-        role: String,
-        sourceAttribute: String,
-        frame: CGRect?,
-        sequence: Int,
-        windowFrame: CGRect?
-    ) -> Double {
-        var value = 25.0
-        if role == kAXStaticTextRole as String { value += 45 }
-        if role == kAXHeadingRole as String { value += 30 }
-        if sourceAttribute == kAXValueAttribute as String { value += 8 }
-        if let frame {
-            value += min(frame.height, 80) * 1.6
-            value += min(frame.width, 300) * 0.04
-            if let windowFrame {
-                let relativeY = max(0, frame.midY - windowFrame.minY)
-                let relativeHeight = max(windowFrame.height, 1)
-                if relativeY < relativeHeight * 0.42 { value += 35 }
-            }
-        }
-        value -= Double(sequence) * 0.012
-        if text.count > 20 { value -= 10 }
-        return value
     }
 
     private func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {

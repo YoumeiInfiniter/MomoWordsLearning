@@ -678,17 +678,19 @@ struct SidebarView: View {
     }
 
     private var wordCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let isPhrase = model.snapshot.word?.contains(" ") == true
+        return VStack(alignment: .leading, spacing: 12) {
             Text(model.snapshot.word == nil ? "等待墨墨显示单词" :
-                 model.isShowingLastCapturedWord ? "最近捕获的单词" : "此刻的单词")
+                 model.isShowingLastCapturedWord ? (isPhrase ? "最近捕获的短语" : "最近捕获的单词") :
+                 (isPhrase ? "此刻的短语" : "此刻的单词"))
                 .font(.custom("Songti SC", size: 13))
                 .foregroundStyle(muted)
             Text(model.snapshot.word ?? "等待学习页单词")
-                .font(.system(size: model.snapshot.word == nil ? 25 : 57, weight: .regular, design: .serif))
+                .font(.system(size: model.snapshot.word == nil ? 25 : isPhrase ? 38 : 57, weight: .regular, design: .serif))
                 .tracking(model.snapshot.word == nil ? 0 : 0.5)
                 .foregroundStyle(.white.opacity(0.95))
                 .minimumScaleFactor(0.5)
-                .lineLimit(1)
+                .lineLimit(isPhrase ? 3 : 1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 4)
@@ -872,6 +874,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             case "president-link": model = LearningPreview.model(word: "president")
             case "legacy-link": model = LearningPreview.model(legacy: true)
             case "streaming-link": model = LearningPreview.streamingModel()
+            case "phrase-capture":
+                let preview = CompanionLifecycleChecks.previewModel()
+                preview.applySnapshot(CompanionLifecycleChecks().snapshot("affix value to sth."))
+                model = preview
             default: model = CompanionLifecycleChecks.previewModel()
             }
         }

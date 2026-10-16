@@ -5,6 +5,11 @@ import MaimemoAXCore
 @MainActor
 struct MaimemoAXProbe {
     static func main() {
+        if CommandLine.arguments.contains("--offline-check") {
+            do { try HeadwordChecks.run() }
+            catch { fputs("AX reader check failed: \(error)\n", stderr); exit(1) }
+            return
+        }
         let watch = CommandLine.arguments.contains("--watch")
         let dump = CommandLine.arguments.contains("--dump")
         let reader = MaimemoAccessibilityReader()

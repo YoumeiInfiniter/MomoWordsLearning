@@ -22,13 +22,35 @@ struct CompanionLifecycleChecks {
             ("cached anchor zero requests", { try await checks.testFailureReturnAndCachedAnchorNeverSubmit() }),
             ("local response recovery", { try checks.testLocalReceivedResponseRecovery() }),
             ("payment failure", { try await checks.testImagePaymentFailureDoesNotResubmit() }),
-            ("legacy learning-link upgrade", { try await checks.testLegacyUpgradeOnlyPreparesTextAndPlan() })
+            ("legacy learning-link upgrade", { try await checks.testLegacyUpgradeOnlyPreparesTextAndPlan() }),
+            ("streaming reveal continuity", { try await checks.testStreamingRevealKeepsFirstContentAndOneRequest() })
         ]
         for (name, check) in cases {
             do { try await check() }
             catch { throw Failure(message: "\(name): \(error)") }
         }
         print("companion-lifecycle-check: 切词、设置、收起、重复点击、旧图与新版本隔离、历史零请求、原词保存和失败保护通过")
+    }
+
+    func testStreamingRevealKeepsFirstContentAndOneRequest() async throws {
+        let model = LearningPreview.streamingModel(firstDelay: 0.08, completionDelay: 0.3)
+        defer { try? FileManager.default.removeItem(at: model.imageTasks.fileURL.deletingLastPathComponent()) }
+        model.openSettings(); model.returnToLearning()
+        try Self.no(model.isMemoryRevealed); try Self.equal(LearningPreview.streamRequestCount, 0)
+        model.revealMemoryHelp(); model.revealMemoryHelp()
+        try Self.yes(model.isGenerating); try Self.isNil(model.memoryCard)
+        try await waitFor { model.quickHint != nil }
+        let hint = model.quickHint!
+        try Self.notNil(hint.wordLink); try Self.isNil(model.memoryCard)
+        model.collapseMemoryHelp(); model.revealMemoryHelp(); model.revealMemoryHelp()
+        try await waitFor { !model.isGenerating }
+        try Self.isNil(model.memoryError)
+        try Self.equal(model.memoryCard?.wordLink, hint.wordLink)
+        try Self.equal(model.memoryCard?.coreConcept, hint.coreConcept)
+        try Self.equal(model.selectedBranch, hint.branch)
+        try Self.equal(model.cardHistory.cards.count, 1)
+        try Self.equal(LearningPreview.streamRequestCount, 1)
+        try Self.yes(model.imageTasks.records.isEmpty)
     }
     static func previewModel(imageGenerator: (any MemoryImageGenerator)? = nil) -> CompanionViewModel {
         let checks = Self()

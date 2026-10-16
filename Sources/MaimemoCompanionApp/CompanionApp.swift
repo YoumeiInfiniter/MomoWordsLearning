@@ -562,7 +562,6 @@ final class CompanionViewModel: ObservableObject {
 
 struct SidebarView: View {
     @ObservedObject var model: CompanionViewModel
-    @State private var isRevealHovered = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let background = Color(red: 0.055, green: 0.075, blue: 0.105)
@@ -582,55 +581,50 @@ struct SidebarView: View {
                 .ignoresSafeArea().allowsHitTesting(false)
 
             GeometryReader { geometry in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        if model.showSettings {
-                            settingsPage
-                        } else {
-                            header
-                            if !model.snapshot.appFound || !model.snapshot.isTrusted || model.isShowingLastCapturedWord {
-                                connectionCard
-                            }
-                            if model.isMemoryRevealed {
+                let inset: CGFloat = geometry.size.width < 365 ? 18 : 24
+                if model.showSettings {
+                    ScrollView {
+                        settingsPage.padding(inset).frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        header.padding(.horizontal, inset).padding(.top, 24).padding(.bottom, 20)
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 20) {
+                                if !model.snapshot.appFound || !model.snapshot.isTrusted || model.isShowingLastCapturedWord {
+                                    connectionCard
+                                }
                                 wordCard
+                                // A single view and material surface survive reveal, loading and streaming.
                                 MemoryLinkPanelView(model: model)
-                            } else {
-                                revealSurface(minHeight: geometry.size.height - 140)
+                            }
+                            .padding(.horizontal, inset).padding(.bottom, 24)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .overlay {
+                            if !model.isMemoryRevealed, model.snapshot.word != nil {
+                                // A gesture-only surface has no Button hover highlight and
+                                // also receives taps over text and empty scroll-view margins.
+                                Color.clear.contentShape(Rectangle())
+                                    .onTapGesture { model.revealMemoryHelp() }
+                                    .accessibilityHidden(true)
                             }
                         }
+                        .accessibilityIdentifier("learning-area")
+                        .accessibilityLabel(model.isMemoryRevealed ? "学习区域" : "查看\(model.snapshot.word ?? "当前单词")的线索")
+                        .accessibilityHint(model.isMemoryRevealed ? "" : "顶部工具栏下方均可点开；已有线索立即显示，没有线索时调用已配置的模型")
+                        .accessibilityAction(named: Text("查看线索")) { model.revealMemoryHelp() }
                     }
-                    .padding(geometry.size.width < 365 ? 18 : 24)
-                    .frame(minHeight: geometry.size.height, alignment: .top)
                 }
             }
         }
         .frame(minWidth: 320, idealWidth: 410, maxWidth: 580, minHeight: 300)
         .preferredColorScheme(.dark)
-        .animation(MemoryMotion.animation(reduceMotion: reduceMotion), value: model.isMemoryRevealed)
         .animation(MemoryMotion.animation(reduceMotion: reduceMotion), value: model.showSettings)
         .sheet(isPresented: $model.showImageTasks) {
             ImageTaskListView(model: model, tasks: model.imageTasks)
         }
-    }
-
-    private func revealSurface(minHeight: CGFloat) -> some View {
-        Button {
-            model.revealMemoryHelp()
-        } label: {
-            VStack(alignment: .leading, spacing: 24) {
-                wordCard
-                MemoryLinkPanelView(model: model)
-            }
-            .frame(maxWidth: .infinity, minHeight: max(0, minHeight), alignment: .topLeading)
-            .contentShape(Rectangle())
-            .background(isRevealHovered ? .white.opacity(0.025) : .clear, in: RoundedRectangle(cornerRadius: 24))
-        }
-        .buttonStyle(.plain)
-        .disabled(model.snapshot.word == nil)
-        .accessibilityLabel("查看\(model.snapshot.word ?? "当前单词")的线索")
-        .accessibilityHint("已有线索立即显示；没有线索时调用已配置的模型")
-        .onHover { isRevealHovered = $0 }
-        .animation(MemoryMotion.animation(reduceMotion: reduceMotion), value: isRevealHovered)
     }
 
     private var header: some View {
@@ -877,6 +871,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             case "measure-link": model = LearningPreview.model(word: "measure")
             case "president-link": model = LearningPreview.model(word: "president")
             case "legacy-link": model = LearningPreview.model(legacy: true)
+            case "streaming-link": model = LearningPreview.streamingModel()
             default: model = CompanionLifecycleChecks.previewModel()
             }
         }

@@ -9,6 +9,7 @@ struct MemoryLinkPanelView: View {
     @State private var showDetails = false
     @State private var showPractice = false
     @State private var presentation: LearningPresentation = .text
+    @State private var panelHeight: CGFloat = 82
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var presentationSelection
 
@@ -21,37 +22,24 @@ struct MemoryLinkPanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if !model.isMemoryRevealed {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("先自己想一想").font(.custom("Songti SC", size: 18))
-                    Text("轻触学习区域，查看线索").font(.caption).foregroundStyle(.secondary)
-                }.padding(.vertical, 3)
-            } else if let card = model.memoryCard {
+                waitingContent(loading: false).transition(.identity)
+            } else if model.memoryCard != nil || model.quickHint != nil {
                 presentationPicker
                 Group {
-                    if presentation == .text { textMethod(card) }
-                    else { illustrationArea(card) }
+                    if presentation == .text { textMethod }
+                    else if let card = model.memoryCard { illustrationArea(card) }
+                }.transition(.identity)
+                sharedMeaning
+                if let card = model.memoryCard {
+                    memoryDetails(card)
+                    revisionControls
+                } else {
+                    Text("首条线索已到达 · 完整卡片尚未校验保存")
+                        .font(.caption2).foregroundStyle(MemoryPalette.secondary)
+                    if model.isGenerating { progressLine }
                 }
-                .transition(.opacity)
-                sharedMeaning(card)
-                memoryDetails(card)
-                revisionControls
-            } else if let hint = model.quickHint {
-                Text("临时线索 · 完整卡片尚未校验保存").font(.caption2).foregroundStyle(.secondary)
-                if let link = hint.wordLink {
-                    Text(MemoryPanelCopy.cue(link.cue, source: link.source))
-                        .font(.custom("Songti SC", size: 16)).foregroundStyle(MemoryPalette.cue)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(link.connection).font(.custom("Songti SC", size: 14)).foregroundStyle(MemoryPalette.body)
-                        .fixedSize(horizontal: false, vertical: true)
-                    DisclosureGroup("记忆细节", isExpanded: $showDetails.animation(MemoryMotion.animation(reduceMotion: reduceMotion))) {
-                        recallLine(link.recall).padding(.top, 6)
-                    }.font(.custom("Songti SC", size: 12)).tint(MemoryPalette.cue)
-                } else { anchorContent(hint.anchor) }
-                coreMeaning(hint.coreConcept)
-                if let branch = hint.branch { contextLine(branch) }
-                if model.isGenerating { progressLine }
             } else if model.isGenerating {
-                progressLine
+                waitingContent(loading: true).transition(.identity)
             } else {
                 Text(model.modelIsConfigured ? "线索尚未准备好" : "先接入记忆模型")
                 if model.memoryError == nil {
@@ -82,11 +70,37 @@ struct MemoryLinkPanelView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: 54, alignment: .topLeading)
         .padding(14)
+        .background(GeometryReader { geometry in
+            Color.clear.preference(key: MemoryPanelHeightKey.self, value: geometry.size.height)
+        })
+        .fixedSize(horizontal: false, vertical: true)
+        // Only the containing surface changes height. Text keeps its natural layout
+        // and is revealed by the growing clip, without fading/replacing the glass.
+        .frame(height: panelHeight, alignment: .top)
+        .clipped()
         .memoryGlass(cornerRadius: 25)
+        .disclosureGroupStyle(MemoryDisclosureStyle())
+        .onPreferenceChange(MemoryPanelHeightKey.self) { height in
+            guard height > 0, abs(panelHeight - height) > 0.5 else { return }
+            withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { panelHeight = height }
+        }
         .onChange(of: model.snapshot.word) { _ in resetPresentation() }
         .onChange(of: model.isMemoryRevealed) { revealed in if !revealed { resetPresentation() } }
         .onChange(of: model.memoryCard?.versionKey) { _ in resetDetails() }
+    }
+
+    private func waitingContent(loading: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(loading ? "正在准备线索…" : "先自己想一想")
+                    .font(.custom("Songti SC", size: 18))
+                if loading { ProgressView().controlSize(.mini) }
+            }
+            Text(loading ? "收到内容后，在这里逐步展开" : "轻触学习区域，查看线索")
+                .font(.caption).foregroundStyle(MemoryPalette.secondary)
+        }
     }
 
     private func resetPresentation() {
@@ -122,6 +136,7 @@ struct MemoryLinkPanelView: View {
                         .contentShape(RoundedRectangle(cornerRadius: 11))
                 }
                 .buttonStyle(.plain)
+                .disabled(item == .image && model.memoryCard == nil)
                 .accessibilityAddTraits(presentation == item ? [.isSelected] : [])
                 .accessibilityHint(item == .image ? "只切换展示；生成图片需另行点击" : "查看原词如何连接到意思")
             }
@@ -131,10 +146,13 @@ struct MemoryLinkPanelView: View {
         .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).strokeBorder(.white.opacity(0.055)))
     }
 
-    @ViewBuilder private func textMethod(_ card: MemoryCard) -> some View {
-        if let link = card.wordLink {
+    @ViewBuilder private var textMethod: some View {
+        let card = model.memoryCard
+        let hint = model.quickHint
+        let kind = card?.anchor?.kind ?? hint?.anchor.kind
+        if let link = card?.wordLink ?? hint?.wordLink {
             VStack(alignment: .leading, spacing: 7) {
-                sectionLabel(card.anchor?.kind.label ?? "从原词认出意思", symbol: "link")
+                sectionLabel(kind?.label ?? "从原词认出意思", symbol: "link")
                 Text(MemoryPanelCopy.cue(link.cue, source: link.source))
                     .font(.custom("Songti SC", size: 16)).foregroundStyle(MemoryPalette.cue)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
@@ -142,21 +160,23 @@ struct MemoryLinkPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }.padding(11).frame(maxWidth: .infinity, alignment: .leading)
                 .memoryGlass(cornerRadius: 16, prominence: .subtle)
-            if card.anchor?.kind == .sound || card.anchor?.kind == .hybrid {
+            if kind == .sound || kind == .hybrid {
                 Text("声音联想是助记，不是标准发音或词源").font(.caption2).foregroundStyle(MemoryPalette.secondary)
             }
-        } else {
+        } else if let card {
             legacyUpgrade("这份旧记法尚未记录原词联系")
             if let anchor = card.anchor { anchorContent(anchor) }
+        } else if let hint {
+            anchorContent(hint.anchor)
         }
-        if card.analysis?.notSuitableReason != nil {
+        if card?.analysis?.notSuitableReason != nil {
             Button {
                 withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { showDetails = true }
             } label: {
                 Label("本次记法不适用 · 查看细节", systemImage: "exclamationmark.circle")
             }.buttonStyle(.plain).font(.caption).foregroundStyle(.orange)
         }
-        if model.isGenerating { progressLine }
+        if card != nil && model.isGenerating { progressLine }
     }
 
     private func memoryDetails(_ card: MemoryCard) -> some View {
@@ -218,35 +238,38 @@ struct MemoryLinkPanelView: View {
         .font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.secondary).tint(MemoryPalette.cue)
     }
 
-    @ViewBuilder private func sharedMeaning(_ card: MemoryCard) -> some View {
-        coreMeaning(card.coreConcept)
-        if card.caveat != nil {
+    @ViewBuilder private var sharedMeaning: some View {
+        let card = model.memoryCard
+        if let concept = card?.coreConcept ?? model.quickHint?.coreConcept { coreMeaning(concept) }
+        if card?.caveat != nil {
             Button {
                 withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { showDetails = true }
             } label: {
                 Label("词义有补充说明 · 查看细节", systemImage: "info.circle")
             }.buttonStyle(.plain).font(.caption2).foregroundStyle(MemoryPalette.secondary)
         }
-        if card.branches.count > 1 {
+        if let card, card.branches.count > 1 {
             Menu("当前用法：\(model.selectedBranch?.partOfSpeech ?? "选择")") {
                 ForEach(card.branches) { branch in
                     Button("\(branch.partOfSpeech) · \(branch.chineseMeaning)") { model.selectBranch(branch) }
                 }
             }.font(.caption)
         }
-        if let branch = model.selectedBranch { contextLine(branch) }
-        DisclosureGroup("用一个新句试试", isExpanded: $showPractice.animation(MemoryMotion.animation(reduceMotion: reduceMotion))) {
-            VStack(alignment: .leading, spacing: 9) {
-                Text(card.transferCheck.sentence).font(.system(size: 14, design: .serif)).fixedSize(horizontal: false, vertical: true)
-                Button(model.showAnswer ? "隐藏答案" : "查看答案") {
-                    withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { model.showAnswer.toggle() }
-                }.memoryGlassButtonStyle()
-                if model.showAnswer {
-                    Text(card.transferCheck.answer)
-                    Text(card.transferCheck.clue).foregroundStyle(.secondary)
-                }
-            }.font(.custom("Songti SC", size: 12)).padding(.top, 7)
-        }.font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.secondary).tint(MemoryPalette.context)
+        if let branch = model.selectedBranch ?? model.quickHint?.branch { contextLine(branch) }
+        if let card {
+            DisclosureGroup("用一个新句试试", isExpanded: $showPractice.animation(MemoryMotion.animation(reduceMotion: reduceMotion))) {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text(card.transferCheck.sentence).font(.system(size: 14, design: .serif)).fixedSize(horizontal: false, vertical: true)
+                    Button(model.showAnswer ? "隐藏答案" : "查看答案") {
+                        withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { model.showAnswer.toggle() }
+                    }.memoryGlassButtonStyle()
+                    if model.showAnswer {
+                        Text(card.transferCheck.answer)
+                        Text(card.transferCheck.clue).foregroundStyle(.secondary)
+                    }
+                }.font(.custom("Songti SC", size: 12)).padding(.top, 7)
+            }.font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.secondary).tint(MemoryPalette.context)
+        }
     }
 
     private func anchorContent(_ anchor: MemoryAnchor) -> some View {
@@ -297,7 +320,7 @@ struct MemoryLinkPanelView: View {
                             }.disabled(model.isGenerating)
                         }
                         .font(.custom("Songti SC", size: 12)).padding(.top, 8)
-                    }
+                    }.disclosureGroupStyle(MemoryDisclosureStyle())
                     if model.needsBranchSelection {
                         Text("先选择要补的词性和义项，再点击“只补这个用法”").font(.caption).foregroundStyle(.orange)
                     }
@@ -438,6 +461,11 @@ struct MemoryLinkPanelView: View {
             Text("正在准备线索…").font(.custom("Songti SC", size: 12)).foregroundStyle(.secondary)
         }
     }
+}
+
+private struct MemoryPanelHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 /// Presentation-only removal of a redundant word label; actual phrases remain intact.

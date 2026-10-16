@@ -19,6 +19,38 @@ enum MemoryMotion {
     }
 }
 
+/// macOS's default disclosure only toggles its small triangle. Make the entire
+/// heading one quiet button, including its label and trailing space.
+struct MemoryDisclosureStyle: DisclosureGroupStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) {
+                    configuration.isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
+                        .accessibilityHidden(true)
+                    configuration.label
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(configuration.isExpanded ? "已展开" : "已收起")
+            if configuration.isExpanded {
+                configuration.content.padding(.leading, 16).transition(.identity)
+            }
+        }
+    }
+}
+
 /// A quiet, stationary glass surface; movement is reserved for deliberate interaction.
 private struct MemoryGlassSurface: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency

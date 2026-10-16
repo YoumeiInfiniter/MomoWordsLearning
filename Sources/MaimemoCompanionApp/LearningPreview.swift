@@ -13,14 +13,7 @@ enum LearningPreview {
         let store = MemoryStore(fileURL: directory.appendingPathComponent("memory.json"))
         try! store.save(card)
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [PreviewResponse.self]
-        var wire = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(sample(word: word))) as! [String: Any]
-        if var anchor = wire["anchor"] as? [String: Any] {
-            anchor.removeValue(forKey: "wordLink"); anchor.removeValue(forKey: "illustration"); wire["anchor"] = anchor
-        }
-        wire["caveat"] = NSNull()
-        wire["analysis"] = ["surfaceWord": word, "lemma": NSNull(), "relations": ["none"], "core": word,
-            "change": NSNull(), "explanation": "整词视觉助记；没有把字母图形当作真实词源。", "parts": [], "relatedWords": [],
-            "notSuitableReason": NSNull(), "alternativeSuggestion": NSNull()]
+        let wire = wireObject(word: word)
         PreviewResponse.response = try! JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": String(decoding: try! JSONSerialization.data(withJSONObject: wire), as: UTF8.self)], "finish_reason": "stop"]]])
         let model = CompanionViewModel(memoryStore: store,
             imageStore: MemoryImageStore(directoryURL: directory.appendingPathComponent("images")),
@@ -29,6 +22,44 @@ enum LearningPreview {
             modelConfiguration: ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!, model: "offline-preview", apiKey: "fixture-only"), checkStoredKeys: false)
         model.applySnapshot(checks.snapshot(word)); model.revealMemoryHelp()
         return model
+    }
+
+    /// Exercise the actual SSE client and view transitions without any provider calls.
+    static func streamingModel(firstDelay: Double = 6, completionDelay: Double = 14) -> CompanionViewModel {
+        let checks = CompanionLifecycleChecks()
+        let directory = try! checks.temporaryDirectory()
+        let wire = wireObject(word: "temporary")
+        let firstKeys = ["word", "coreConcept", "anchor", "wordLink", "branches"]
+        func fields(_ keys: [String]) -> String {
+            keys.map { key in
+                let value = try! JSONSerialization.data(withJSONObject: wire[key]!, options: [.fragmentsAllowed, .sortedKeys])
+                return "\"\(key)\":" + String(decoding: value, as: UTF8.self)
+            }.joined(separator: ",")
+        }
+        let prefix = "{" + fields(firstKeys)
+        let suffix = "," + fields(wire.keys.filter { !firstKeys.contains($0) }.sorted()) + "}"
+        PreviewStream.configure(prefix: prefix, suffix: suffix, firstDelay: firstDelay, completionDelay: completionDelay)
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [PreviewStream.self]
+        let model = CompanionViewModel(memoryStore: MemoryStore(fileURL: directory.appendingPathComponent("memory.json")),
+            imageStore: MemoryImageStore(directoryURL: directory.appendingPathComponent("images")),
+            modelClient: OpenAICompatibleClient(session: URLSession(configuration: configuration)),
+            modelConfiguration: ModelConfiguration(endpoint: URL(string: "https://unit.test/chat/completions")!, model: "offline-stream", apiKey: "fixture-only"), checkStoredKeys: false)
+        model.applySnapshot(checks.snapshot("temporary"))
+        return model
+    }
+
+    static var streamRequestCount: Int { PreviewStream.count }
+
+    private static func wireObject(word: String) -> [String: Any] {
+        var wire = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(sample(word: word))) as! [String: Any]
+        if var anchor = wire["anchor"] as? [String: Any] {
+            anchor.removeValue(forKey: "wordLink"); anchor.removeValue(forKey: "illustration"); wire["anchor"] = anchor
+        }
+        wire["caveat"] = NSNull()
+        wire["analysis"] = ["surfaceWord": word, "lemma": NSNull(), "relations": ["none"], "core": word,
+            "change": NSNull(), "explanation": "整词视觉助记；没有把字母图形当作真实词源。", "parts": [], "relatedWords": [],
+            "notSuitableReason": NSNull(), "alternativeSuggestion": NSNull()]
+        return wire
     }
 
     static func sample(word: String, legacy: Bool = false) -> MemoryCard {
@@ -133,5 +164,48 @@ private final class PreviewResponse: URLProtocol, @unchecked Sendable {
         client?.urlProtocol(self, didLoad: Self.response); client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private final class PreviewStream: URLProtocol, @unchecked Sendable {
+    private struct Stages: Sendable {
+        let prefix: String, suffix: String
+        let firstDelay: Double, completionDelay: Double
+    }
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var stages = Stages(prefix: "", suffix: "", firstDelay: 0, completionDelay: 0)
+    nonisolated(unsafe) private static var requests = 0
+    private var work: Task<Void, Never>?
+    static var count: Int { lock.withLock { requests } }
+    static func configure(prefix: String, suffix: String, firstDelay: Double, completionDelay: Double) {
+        lock.withLock {
+            stages = Stages(prefix: prefix, suffix: suffix, firstDelay: firstDelay, completionDelay: completionDelay)
+            requests = 0
+        }
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let stages = Self.lock.withLock { Self.requests += 1; return Self.stages }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"])!, cacheStoragePolicy: .notAllowed)
+        work = Task { @Sendable [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(stages.firstDelay))
+                guard let self else { return }
+                self.send(stages.prefix, finished: false)
+                try await Task.sleep(for: .seconds(stages.completionDelay))
+                try Task.checkCancellation()
+                self.send(stages.suffix, finished: true)
+                self.client?.urlProtocol(self, didLoad: Data("data: [DONE]\n\n".utf8))
+                self.client?.urlProtocolDidFinishLoading(self)
+            } catch { /* URLSession owns cancellation; never deliver another stage. */ }
+        }
+    }
+    private func send(_ text: String, finished: Bool) {
+        let choice: [String: Any] = ["delta": ["content": text], "finish_reason": finished ? "stop" : NSNull()]
+        let json = try! JSONSerialization.data(withJSONObject: ["choices": [choice]])
+        client?.urlProtocol(self, didLoad: Data("data: ".utf8) + json + Data("\n\n".utf8))
+    }
+    override func stopLoading() { work?.cancel() }
 }
 #endif

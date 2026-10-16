@@ -6,6 +6,8 @@ struct MemoryLinkPanelView: View {
     @ObservedObject var model: CompanionViewModel
     @State private var showMore = false
     @State private var showAdjustments = false
+    @State private var showDetails = false
+    @State private var showPractice = false
     @State private var presentation: LearningPresentation = .text
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var presentationSelection
@@ -17,7 +19,7 @@ struct MemoryLinkPanelView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 12) {
             if !model.isMemoryRevealed {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("先自己想一想").font(.custom("Songti SC", size: 18))
@@ -31,14 +33,19 @@ struct MemoryLinkPanelView: View {
                 }
                 .transition(.opacity)
                 sharedMeaning(card)
+                memoryDetails(card)
                 revisionControls
             } else if let hint = model.quickHint {
                 Text("临时线索 · 完整卡片尚未校验保存").font(.caption2).foregroundStyle(.secondary)
                 if let link = hint.wordLink {
-                    Text(link.source).font(.system(size: 24, design: .serif)).textSelection(.enabled)
-                    Text(link.cue).font(.custom("Songti SC", size: 15)).fixedSize(horizontal: false, vertical: true)
-                    Text(link.connection).font(.custom("Songti SC", size: 14)).fixedSize(horizontal: false, vertical: true)
-                    recallLine(link.recall)
+                    Text(MemoryPanelCopy.cue(link.cue, source: link.source))
+                        .font(.custom("Songti SC", size: 16)).foregroundStyle(MemoryPalette.cue)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(link.connection).font(.custom("Songti SC", size: 14)).foregroundStyle(MemoryPalette.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("记忆细节", isExpanded: $showDetails.animation(MemoryMotion.animation(reduceMotion: reduceMotion))) {
+                        recallLine(link.recall).padding(.top, 6)
+                    }.font(.custom("Songti SC", size: 12)).tint(MemoryPalette.cue)
                 } else { anchorContent(hint.anchor) }
                 coreMeaning(hint.coreConcept)
                 if let branch = hint.branch { contextLine(branch) }
@@ -75,16 +82,23 @@ struct MemoryLinkPanelView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
+        .padding(14)
         .memoryGlass(cornerRadius: 25)
         .onChange(of: model.snapshot.word) { _ in resetPresentation() }
         .onChange(of: model.isMemoryRevealed) { revealed in if !revealed { resetPresentation() } }
+        .onChange(of: model.memoryCard?.versionKey) { _ in resetDetails() }
     }
 
     private func resetPresentation() {
         presentation = .text
         showMore = false
         showAdjustments = false
+        resetDetails()
+    }
+
+    private func resetDetails() {
+        showDetails = false
+        showPractice = false
     }
 
     private var presentationPicker: some View {
@@ -95,7 +109,7 @@ struct MemoryLinkPanelView: View {
                 } label: {
                     Label(item.label, systemImage: item.symbol)
                         .font(.custom("Songti SC", size: 13))
-                        .foregroundStyle(.white.opacity(presentation == item ? 0.96 : 0.52))
+                        .foregroundStyle(presentation == item ? MemoryPalette.cue : MemoryPalette.secondary)
                         .frame(maxWidth: .infinity, minHeight: 34)
                         .background {
                             if presentation == item {
@@ -119,73 +133,99 @@ struct MemoryLinkPanelView: View {
 
     @ViewBuilder private func textMethod(_ card: MemoryCard) -> some View {
         if let link = card.wordLink {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 7) {
                 sectionLabel(card.anchor?.kind.label ?? "从原词认出意思", symbol: "link")
-                Text(link.source).font(.system(size: 24, weight: .regular, design: .serif))
+                Text(MemoryPanelCopy.cue(link.cue, source: link.source))
+                    .font(.custom("Songti SC", size: 16)).foregroundStyle(MemoryPalette.cue)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                Label(link.cue, systemImage: "arrow.turn.down.right")
-                    .font(.custom("Songti SC", size: 15)).fixedSize(horizontal: false, vertical: true)
-                Text(link.connection).font(.custom("Songti SC", size: 14)).foregroundStyle(.white.opacity(0.79))
+                Text(link.connection).font(.custom("Songti SC", size: 14)).foregroundStyle(MemoryPalette.body)
                     .fixedSize(horizontal: false, vertical: true)
-                recallLine(link.recall)
-            }.padding(13).frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(11).frame(maxWidth: .infinity, alignment: .leading)
                 .memoryGlass(cornerRadius: 16, prominence: .subtle)
             if card.anchor?.kind == .sound || card.anchor?.kind == .hybrid {
-                Text("声音联想是助记，不是标准发音或词源").font(.caption2).foregroundStyle(.secondary)
-            }
-            if let anchor = card.anchor {
-                DisclosureGroup("展开这条联想") {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(anchor.cue).font(.custom("Songti SC", size: 14))
-                        Text(anchor.explanation).font(.custom("Songti SC", size: 13)).foregroundStyle(.white.opacity(0.72))
-                    }.fixedSize(horizontal: false, vertical: true).padding(.top, 7)
-                }.font(.custom("Songti SC", size: 12))
+                Text("声音联想是助记，不是标准发音或词源").font(.caption2).foregroundStyle(MemoryPalette.secondary)
             }
         } else {
             legacyUpgrade("这份旧记法尚未记录原词联系")
             if let anchor = card.anchor { anchorContent(anchor) }
         }
-        if let analysis = card.analysis {
-            if !analysis.parts.isEmpty {
-                Text(analysis.parts.map(\.text).joined(separator: " + "))
-                    .font(.system(size: 19, design: .serif)).textSelection(.enabled)
-                ForEach(Array(analysis.parts.enumerated()), id: \.offset) { _, part in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text(part.text).font(.system(size: 14, design: .serif))
-                        Text(part.meaning ?? "剩余字母，无需另背含义").font(.custom("Songti SC", size: 12))
-                        Spacer(minLength: 0)
-                        Text(part.evidence == .mnemonic ? "助记" : "结构")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if let change = analysis.change { Text(change).font(.custom("Songti SC", size: 13)) }
-            if let reason = analysis.notSuitableReason {
-                Text("这次不适合：\(reason)").font(.custom("Songti SC", size: 13)).foregroundStyle(.orange)
-                if let suggestion = analysis.alternativeSuggestion {
-                    Text("可尝试：\(suggestion)").font(.custom("Songti SC", size: 12)).foregroundStyle(.secondary)
-                }
-            }
-            DisclosureGroup("拆分依据与相关词") {
-                VStack(alignment: .leading, spacing: 9) {
-                    Text(analysis.relations.map(\.label).joined(separator: " · "))
-                    if let lemma = analysis.lemma { Text("原形参考：\(lemma)") }
-                    Text(analysis.explanation)
-                    ForEach(Array(analysis.relatedWords.enumerated()), id: \.offset) { _, related in
-                        Text("\(related.word) · \(related.partOfSpeech) · \(related.meaning)（\(related.relation.label)）")
-                    }
-                    Text("语言分析由模型提供，尚未经词典核验；相关词不计入掌握记录")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }.font(.custom("Songti SC", size: 12)).padding(.top, 8)
-            }.font(.custom("Songti SC", size: 12))
+        if card.analysis?.notSuitableReason != nil {
+            Button {
+                withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { showDetails = true }
+            } label: {
+                Label("本次记法不适用 · 查看细节", systemImage: "exclamationmark.circle")
+            }.buttonStyle(.plain).font(.caption).foregroundStyle(.orange)
         }
         if model.isGenerating { progressLine }
     }
 
+    private func memoryDetails(_ card: MemoryCard) -> some View {
+        DisclosureGroup((card.analysis?.parts.count ?? 0) > 1 ? "拆词与记忆细节" : "记忆细节",
+                        isExpanded: $showDetails.animation(MemoryMotion.animation(reduceMotion: reduceMotion))) {
+            VStack(alignment: .leading, spacing: 11) {
+                if let link = card.wordLink { recallLine(link.recall) }
+                if let anchor = card.anchor, let link = card.wordLink,
+                   anchor.cue != link.cue || anchor.explanation != link.connection {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("这条联想").font(.caption2).foregroundStyle(MemoryPalette.secondary)
+                        Text(anchor.cue).font(.custom("Songti SC", size: 14)).foregroundStyle(MemoryPalette.cue)
+                        Text(anchor.explanation).font(.custom("Songti SC", size: 13)).foregroundStyle(MemoryPalette.body)
+                    }
+                }
+                if let analysis = card.analysis {
+                    if !analysis.parts.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(analysis.parts.map(\.text).joined(separator: " + "))
+                                .font(.system(size: 16, design: .serif)).foregroundStyle(MemoryPalette.cue)
+                                .textSelection(.enabled)
+                            ForEach(Array(analysis.parts.enumerated()), id: \.offset) { _, part in
+                                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                    Text(part.text).font(.system(size: 13, weight: .medium, design: .serif))
+                                        .foregroundStyle(MemoryPalette.cue)
+                                    Text(part.meaning ?? "剩余字母，无需另背含义")
+                                        .font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.body)
+                                    Spacer(minLength: 0)
+                                    Text(part.evidence == .mnemonic ? "助记" : "结构")
+                                        .font(.caption2).foregroundStyle(MemoryPalette.secondary)
+                                }
+                            }
+                        }
+                    }
+                    if let change = analysis.change { Text(change).foregroundStyle(MemoryPalette.body) }
+                    if let reason = analysis.notSuitableReason {
+                        Text("这次不适合：\(reason)").foregroundStyle(.orange)
+                        if let suggestion = analysis.alternativeSuggestion {
+                            Text("可尝试：\(suggestion)").foregroundStyle(MemoryPalette.secondary)
+                        }
+                    }
+                    Text(analysis.relations.map(\.label).joined(separator: " · "))
+                        .foregroundStyle(MemoryPalette.cue)
+                    if let lemma = analysis.lemma { Text("原形参考：\(lemma)") }
+                    if analysis.explanation != card.wordLink?.connection && analysis.explanation != card.anchor?.explanation {
+                        Text(analysis.explanation)
+                    }
+                    ForEach(Array(analysis.relatedWords.enumerated()), id: \.offset) { _, related in
+                        Text("\(related.word) · \(related.partOfSpeech) · \(related.meaning)（\(related.relation.label)）")
+                    }
+                    Text("语言分析由模型提供，尚未经词典核验；相关词不计入掌握记录")
+                        .font(.caption2).foregroundStyle(MemoryPalette.secondary)
+                }
+                if let caveat = card.caveat { Text(caveat).foregroundStyle(MemoryPalette.secondary) }
+            }
+            .font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.body)
+            .fixedSize(horizontal: false, vertical: true).padding(.top, 8)
+        }
+        .font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.secondary).tint(MemoryPalette.cue)
+    }
+
     @ViewBuilder private func sharedMeaning(_ card: MemoryCard) -> some View {
         coreMeaning(card.coreConcept)
-        if let caveat = card.caveat {
-            Text(caveat).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        if card.caveat != nil {
+            Button {
+                withAnimation(MemoryMotion.animation(reduceMotion: reduceMotion)) { showDetails = true }
+            } label: {
+                Label("词义有补充说明 · 查看细节", systemImage: "info.circle")
+            }.buttonStyle(.plain).font(.caption2).foregroundStyle(MemoryPalette.secondary)
         }
         if card.branches.count > 1 {
             Menu("当前用法：\(model.selectedBranch?.partOfSpeech ?? "选择")") {
@@ -195,7 +235,7 @@ struct MemoryLinkPanelView: View {
             }.font(.caption)
         }
         if let branch = model.selectedBranch { contextLine(branch) }
-        DisclosureGroup("用一个新句试试") {
+        DisclosureGroup("用一个新句试试", isExpanded: $showPractice.animation(MemoryMotion.animation(reduceMotion: reduceMotion))) {
             VStack(alignment: .leading, spacing: 9) {
                 Text(card.transferCheck.sentence).font(.system(size: 14, design: .serif)).fixedSize(horizontal: false, vertical: true)
                 Button(model.showAnswer ? "隐藏答案" : "查看答案") {
@@ -206,14 +246,15 @@ struct MemoryLinkPanelView: View {
                     Text(card.transferCheck.clue).foregroundStyle(.secondary)
                 }
             }.font(.custom("Songti SC", size: 12)).padding(.top, 7)
-        }.font(.custom("Songti SC", size: 12))
+        }.font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.secondary).tint(MemoryPalette.context)
     }
 
     private func anchorContent(_ anchor: MemoryAnchor) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(anchor.kind.label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-            Text(anchor.cue).font(.custom("Songti SC", size: 21)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
-            Text(anchor.explanation).font(.custom("Songti SC", size: 14)).foregroundStyle(.white.opacity(0.72))
+        VStack(alignment: .leading, spacing: 6) {
+            Text(anchor.kind.label).font(.caption2.weight(.medium)).foregroundStyle(MemoryPalette.secondary)
+            Text(anchor.cue).font(.custom("Songti SC", size: 16)).foregroundStyle(MemoryPalette.cue)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(anchor.explanation).font(.custom("Songti SC", size: 14)).foregroundStyle(MemoryPalette.body)
                 .fixedSize(horizontal: false, vertical: true)
             if anchor.kind == .sound || anchor.kind == .hybrid {
                 Text("声音联想是助记，不是标准发音或词源").font(.caption2).foregroundStyle(.secondary)
@@ -356,32 +397,39 @@ struct MemoryLinkPanelView: View {
     }
 
     private func sectionLabel(_ title: String, symbol: String) -> some View {
-        Label(title, systemImage: symbol).font(.caption2.weight(.medium)).foregroundStyle(.white.opacity(0.53))
+        Label(title, systemImage: symbol).font(.caption2.weight(.medium)).foregroundStyle(MemoryPalette.cue.opacity(0.82))
     }
 
     private func recallLine(_ recall: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("下次看到原词").font(.caption2).foregroundStyle(.white.opacity(0.48))
-            Text(recall).font(.custom("Songti SC", size: 13)).foregroundStyle(.white.opacity(0.88))
+            Text("下次看到原词").font(.caption2).foregroundStyle(MemoryPalette.secondary)
+            Text(recall).font(.custom("Songti SC", size: 13)).foregroundStyle(MemoryPalette.body)
                 .fixedSize(horizontal: false, vertical: true)
         }.padding(.top, 3)
     }
 
     private func coreMeaning(_ concept: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             Divider()
-            Text("抓住共同的意思").font(.caption).foregroundStyle(.secondary)
-            Text(concept).font(.custom("Songti SC", size: 17)).fixedSize(horizontal: false, vertical: true)
+            Text("抓住共同的意思").font(.caption2).foregroundStyle(MemoryPalette.meaning.opacity(0.8))
+            Text(concept).font(.custom("Songti SC", size: 16)).foregroundStyle(MemoryPalette.meaning)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
     private func contextLine(_ branch: MeaningBranch) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(branch.context).font(.system(size: 15, design: .serif)).textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 5) {
+            Text(branch.context).font(.system(size: 14, design: .serif)).foregroundStyle(MemoryPalette.context)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("\(branch.partOfSpeech) · 在这句里：\(branch.chineseMeaning)。\(branch.explanation)")
-                .font(.custom("Songti SC", size: 13)).foregroundStyle(.white.opacity(0.68))
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text(branch.partOfSpeech).font(.system(size: 11, weight: .medium, design: .serif))
+                    .foregroundStyle(MemoryPalette.context.opacity(0.84))
+                Text(branch.chineseMeaning).font(.custom("Songti SC", size: 12))
+                    .foregroundStyle(MemoryPalette.meaning)
+            }.fixedSize(horizontal: false, vertical: true)
+            Text(branch.explanation).font(.custom("Songti SC", size: 12)).foregroundStyle(MemoryPalette.body)
                 .fixedSize(horizontal: false, vertical: true)
-        }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
             .memoryGlass(cornerRadius: 16, prominence: .subtle)
     }
     private var progressLine: some View {
@@ -389,6 +437,21 @@ struct MemoryLinkPanelView: View {
             ProgressView().controlSize(.small)
             Text("正在准备线索…").font(.custom("Songti SC", size: 12)).foregroundStyle(.secondary)
         }
+    }
+}
+
+/// Presentation-only removal of a redundant word label; actual phrases remain intact.
+enum MemoryPanelCopy {
+    static func cue(_ cue: String, source: String) -> String {
+        let text = cue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty,
+              let word = text.range(of: source, options: [.anchored, .caseInsensitive]) else { return text }
+        let remainder = text[word.upperBound...]
+        for delimiter in [" 的", "的", "：", ":"] where remainder.hasPrefix(delimiter) {
+            let compact = remainder.dropFirst(delimiter.count).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !compact.isEmpty { return compact }
+        }
+        return text
     }
 }
 

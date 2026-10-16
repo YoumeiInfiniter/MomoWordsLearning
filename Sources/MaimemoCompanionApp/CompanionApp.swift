@@ -875,6 +875,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             case "image-payment": model = CompanionLifecycleChecks.paymentPreviewModel()
             case "learning-link": model = LearningPreview.model()
             case "measure-link": model = LearningPreview.model(word: "measure")
+            case "president-link": model = LearningPreview.model(word: "president")
             case "legacy-link": model = LearningPreview.model(legacy: true)
             default: model = CompanionLifecycleChecks.previewModel()
             }

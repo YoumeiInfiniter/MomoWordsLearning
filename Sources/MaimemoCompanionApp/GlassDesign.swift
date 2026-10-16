@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// Small, readable accents that retain the dark blue glass theme.
+enum MemoryPalette {
+    static let cue = Color(red: 0.68, green: 0.82, blue: 0.97)
+    static let meaning = Color(red: 0.96, green: 0.84, blue: 0.65)
+    static let body = Color(red: 0.83, green: 0.87, blue: 0.92)
+    static let context = Color(red: 0.65, green: 0.87, blue: 0.83)
+    static let secondary = Color(red: 0.61, green: 0.69, blue: 0.78)
+}
+
 enum MemoryGlassProminence {
     case subtle, regular, raised
 }

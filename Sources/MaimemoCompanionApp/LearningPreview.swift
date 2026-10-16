@@ -32,6 +32,7 @@ enum LearningPreview {
     }
 
     static func sample(word: String, legacy: Bool = false) -> MemoryCard {
+        if word == "president" { return presidentSample() }
         let temporary = word == "temporary"
         let meaning = temporary ? "在有限时间内有效，之后撤下或替换" : "用标准比出大小、程度或价值"
         let cue = temporary ? "temporary 的字母搭成一块可撤走的标牌" : "measure 的整词字母排成一把量尺"
@@ -56,6 +57,34 @@ enum LearningPreview {
             wordLink: legacy ? nil : MemoryWordLink(source: word, cue: cue, connection: connection, recall: recall),
             illustration: legacy ? nil : MemoryIllustrationPlan(scene: cue + "，字母本身承担物体与动作。", mappings: [mapping],
                 explanation: temporary ? "temporary 的全部字母组成标牌，字母可拆的结构配合撤下动作，连接暂时有效的意思。" : "measure 的字母本身就是量尺，字母的间距成为比较用的刻度，连接测量与衡量的意思。", recall: recall))
+    }
+
+    /// Reproduces the user's long layout example; linguistic claims remain explicitly unverified.
+    static func presidentSample() -> MemoryCard {
+        var object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(sample(word: "temporary"))) as! [String: Any]
+        let cue = "president 的 pre（在前）＋ sid（坐）＋ ent（人）"
+        let connection = "president 中的 pre 表示“在前”，sid 与 sit（坐）同源，-ent 表示“人”；合起来是“坐在前面的人”，即主持者、主席、总统。"
+        let recall = "看到 president → 拆出 pre 在前、sid 坐、ent 人 → 坐在前面的人 → 主席／总统"
+        object["word"] = "president"; object["coreConcept"] = "主持事务、处在领导位置的人；主席／总统"
+        object["coreImage"] = "president 的完整字母组成会议席位，最前方的位置承担主持作用"
+        object["anchor"] = ["kind": "morphology", "cue": cue, "explanation": connection, "imagePrompt": NSNull()]
+        object["wordLink"] = ["source": "president", "cue": cue, "connection": connection, "recall": recall]
+        object["illustration"] = ["scene": "president 的完整字母组成会议席位，最前方的位置承担主持作用",
+            "mappings": [["source": "pre", "visual": "前方的字母形成主持席位", "meaning": "处在领导位置"]],
+            "explanation": "pre 的字母形成前排主持席位，以视觉助记连接主席的含义。", "recall": recall]
+        object["branches"] = [["partOfSpeech": "noun", "meaningKey": "leader", "chineseMeaning": "总统；主席",
+            "context": "The president addressed the nation.", "signal": "The 后作主语，是身份名词", "explanation": "这句指向全国讲话的总统。"]]
+        object["methods"] = [["id": "structure", "kind": "morphology", "title": "核心结构", "cue": cue,
+            "whyItHelps": connection, "isLanguageFact": false]]
+        object["transferCheck"] = ["sentence": "She became president of the club.", "targetBranch": "leader", "answer": "她成为俱乐部主席。", "clue": "of the club 限定了领导的组织"]
+        object["caveat"] = "离线排版样例；上述构词内容复现模型回答，尚未词典核验。"
+        object["analysis"] = ["surfaceWord": "president", "lemma": NSNull(), "relations": ["derivation"], "core": "sid", "change": NSNull(),
+            "explanation": connection, "parts": [
+                ["text": "pre", "start": 0, "end": 3, "kind": "prefix", "meaning": "在前", "relation": "derivation", "evidence": "modelUnverified"],
+                ["text": "sid", "start": 3, "end": 6, "kind": "base", "meaning": "坐", "relation": "derivation", "evidence": "modelUnverified"],
+                ["text": "ent", "start": 6, "end": 9, "kind": "suffix", "meaning": "表人", "relation": "derivation", "evidence": "modelUnverified"]],
+            "relatedWords": [], "notSuitableReason": NSNull(), "alternativeSuggestion": NSNull()]
+        return try! JSONDecoder().decode(MemoryCard.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
     static func image(word: String) -> Data {
